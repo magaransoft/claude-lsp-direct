@@ -1,0 +1,9 @@
+{
+  "name": "fixture-vue",
+  "version": "1.0.0",
+  "private": true,
+  "description": "vue-direct verification fixture",
+  "dependencies": {
+    "vue": "^3.4.0"
+  }
+}

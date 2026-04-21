@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  hook-tests:
+    name: hook tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: install pytest
+        run: pip install pytest
+
+      - name: install jq (linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: install jq (macos)
+        if: matrix.os == 'macos-latest'
+        run: brew install jq
+
+      - name: run hook tests
+        run: bash hooks/tests/run.sh
+
+  fixture-probe:
+    name: fixture probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: install language servers
+        run: |
+          npm i -g pyright typescript-language-server typescript
+
+      - name: install jq (linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: install jq (macos)
+        if: matrix.os == 'macos-latest'
+        run: brew install jq
+
+      - name: probe python + typescript fixtures
+        run: bash scripts/verify.sh

@@ -1,0 +1,5 @@
+{
+  "include": ["."],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic"
+}

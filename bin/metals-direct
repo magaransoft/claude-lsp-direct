@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# metals-direct — wrap metals-mcp HTTP transport for direct-bypass usage from Claude Code
+# avoids claude-code MCP client overhead (~7s/call) by talking to metals-mcp over raw HTTP (~30ms)
+# subcommands: start [workspace] | call <tool> <json-args> [workspace] | stop [workspace] | status | tools [workspace]
+set -euo pipefail
+
+STATE_ROOT="${METALS_DIRECT_STATE:-$HOME/.cache/metals-direct}"
+
+die() { echo "metals-direct: $*" >&2; exit 1; }
+
+# resolve workspace: arg > find build.sbt/build.sc walking up > cwd
+resolve_workspace() {
+  local ws="${1:-}"
+  if [ -n "$ws" ]; then
+    ws="$(cd "$ws" && pwd)"
+  else
+    ws="$PWD"
+    while [ "$ws" != "/" ]; do
+      for marker in build.sbt build.sc build.mill; do
+        [ -e "$ws/$marker" ] && { echo "$ws"; return; }
+      done
+      ws="$(dirname "$ws")"
+    done
+    ws="$PWD"
+  fi
+  echo "$ws"
+}
+
+# derive state dir from workspace hash — one slot per workspace
+state_dir() {
+  local ws="$1"
+  local hash
+  hash="$(printf '%s' "$ws" | shasum | awk '{print $1}' | cut -c1-12)"
+  echo "$STATE_ROOT/$hash"
+}
+
+# find free tcp port in ephemeral range
+free_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
+# read state field or empty
+state_get() {
+  local dir="$1" key="$2"
+  [ -f "$dir/$key" ] && cat "$dir/$key" || echo ""
+}
+
+# tcp port ready check — pure bash, no http protocol assumptions
+port_ready() {
+  local port="$1"
+  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && exec 3<&- 3>&-
+}
+
+# is server still alive for this state dir
+server_alive() {
+  local dir="$1"
+  local pid port
+  pid="$(state_get "$dir" pid)"
+  port="$(state_get "$dir" port)"
+  [ -z "$port" ] && return 1
+  # pid empty = adopted/external server — rely on port probe only
+  if [ -n "$pid" ]; then
+    kill -0 "$pid" 2>/dev/null || return 1
+  fi
+  port_ready "$port"
+}
+
+cmd_start() {
+  command -v metals-mcp >/dev/null || die "metals-mcp not on PATH — install via 'brew install metals' or 'cs install metals-mcp'"
+  local ws dir pid port
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  mkdir -p "$dir"
+  if server_alive "$dir"; then
+    echo "already running: workspace=$ws port=$(state_get "$dir" port) pid=$(state_get "$dir" pid)"
+    return 0
+  fi
+  # adopt untracked server — metals-mcp writes $ws/.metals/mcp.json on startup regardless of launcher
+  # (IDE, prior Claude session, etc.); probe that port before spawning a second process
+  local mcp_json="$ws/.metals/mcp.json"
+  if [ -f "$mcp_json" ]; then
+    local adopted_port
+    adopted_port="$(sed -nE 's#.*localhost:([0-9]+)/mcp.*#\1#p' "$mcp_json" | head -1)"
+    if [ -n "$adopted_port" ] && port_ready "$adopted_port"; then
+      echo "$ws" > "$dir/workspace"
+      echo "$adopted_port" > "$dir/port"
+      : > "$dir/pid"   # empty pid = adopted/external; stop becomes unregister-only
+      : > "$dir/session"
+      echo "adopted: workspace=$ws port=$adopted_port (external metals-mcp) state=$dir"
+      return 0
+    fi
+  fi
+  port="$(free_port)"
+  echo "$ws" > "$dir/workspace"
+  echo "$port" > "$dir/port"
+  : > "$dir/session"
+  nohup metals-mcp --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
+  pid=$!
+  echo "$pid" > "$dir/pid"
+  # wait up to 180s for server to bind tcp port — bloop import on cold .bloop may take a while
+  local i=0
+  until port_ready "$port"; do
+    sleep 1
+    i=$((i+1))
+    [ "$i" -ge 180 ] && { kill "$pid" 2>/dev/null; die "metals-mcp did not bind port $port within 180s — check $dir/log"; }
+    kill -0 "$pid" 2>/dev/null || die "metals-mcp died at startup — check $dir/log"
+  done
+  echo "started: workspace=$ws port=$port pid=$pid state=$dir"
+}
+
+# ensure session id exists and is current; re-init if empty
+ensure_session() {
+  local dir="$1"
+  local port sid
+  port="$(state_get "$dir" port)"
+  sid="$(state_get "$dir" session)"
+  [ -n "$sid" ] && { echo "$sid"; return; }
+  local hdrs
+  hdrs="$(curl -fsS -m 10 --dump-header - --output /dev/null "http://localhost:$port/mcp" -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"metals-direct","version":"1.0"}}}' )" || die "initialize failed"
+  sid="$(printf '%s' "$hdrs" | awk 'tolower($1)=="mcp-session-id:"{print $2}' | tr -d '\r\n')"
+  [ -z "$sid" ] && die "no mcp-session-id returned by server"
+  echo "$sid" > "$dir/session"
+  # notifications/initialized required by MCP spec
+  curl -fsS -m 5 "http://localhost:$port/mcp" -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H "mcp-session-id: $sid" \
+    -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null 2>&1 || true
+  echo "$sid"
+}
+
+cmd_call() {
+  local tool="${1:-}"; shift || true
+  local args_json="${1-}"; shift || true
+  [ -z "$args_json" ] && args_json='{}'
+  [ -z "$tool" ] && die "usage: metals-direct call <tool> '<json-args>' [workspace]"
+  local ws dir port sid
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  sid="$(ensure_session "$dir")"
+  local payload
+  payload="$(jq -cn --arg tool "$tool" --argjson args "$args_json" \
+    '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:$tool,arguments:$args}}')"
+  local resp
+  resp="$(curl -fsS -m 120 "http://localhost:$port/mcp" -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H "mcp-session-id: $sid" \
+    -d "$payload")" || die "tools/call failed"
+  # server may respond as SSE or plain json — strip 'data: ' prefix if present
+  printf '%s' "$resp" | sed -n 's/^data: //p; /^data: /!p' | jq -r '.result // .' 2>/dev/null || printf '%s\n' "$resp"
+}
+
+cmd_tools() {
+  local ws dir port sid
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  sid="$(ensure_session "$dir")"
+  local resp
+  resp="$(curl -fsS -m 30 "http://localhost:$port/mcp" -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H "mcp-session-id: $sid" \
+    -d '{"jsonrpc":"2.0","id":3,"method":"tools/list"}')"
+  printf '%s' "$resp" | sed -n 's/^data: //p; /^data: /!p' | jq -r '.result.tools[] | "\(.name)\t\(.description // "")"' 2>/dev/null || printf '%s\n' "$resp"
+}
+
+cmd_stop() {
+  local ws dir pid
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  pid="$(state_get "$dir" pid)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid"
+    echo "stopped: pid=$pid workspace=$ws"
+  elif [ -z "$pid" ] && [ -n "$(state_get "$dir" port)" ]; then
+    echo "unregistered adopted server for $ws (external process left running)"
+  else
+    echo "no running server for $ws"
+  fi
+  rm -f "$dir/pid" "$dir/port" "$dir/session"
+}
+
+cmd_status() {
+  [ -d "$STATE_ROOT" ] || { echo "no state dir"; return; }
+  local any=0
+  for dir in "$STATE_ROOT"/*/; do
+    [ -d "$dir" ] || continue
+    any=1
+    local ws pid port alive
+    ws="$(state_get "$dir" workspace)"
+    pid="$(state_get "$dir" pid)"
+    port="$(state_get "$dir" port)"
+    alive="dead"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive="alive"
+    printf 'workspace=%s  port=%s  pid=%s  %s\n' "$ws" "$port" "$pid" "$alive"
+  done
+  [ "$any" = 0 ] && echo "no servers tracked"
+}
+
+case "${1:-}" in
+  start)  shift; cmd_start "$@" ;;
+  call)   shift; cmd_call "$@" ;;
+  tools)  shift; cmd_tools "$@" ;;
+  stop)   shift; cmd_stop "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  ""|-h|--help)
+    cat <<EOF
+metals-direct — talk to metals-mcp over direct HTTP, bypass claude MCP client overhead
+
+usage:
+  metals-direct start [workspace]              spawn metals-mcp for workspace (default: cwd walking up for build.sbt/build.sc/build.mill)
+  metals-direct call <tool> '<json-args>' [ws] issue tools/call — auto-starts server if needed, reuses session
+  metals-direct tools [workspace]              list available tools (list-modules, get-usages, get-source, get-docs, inspect, glob-search, ...)
+  metals-direct stop [workspace]               kill server for workspace
+  metals-direct status                         show all tracked servers
+
+examples:
+  cd ~/projects/your-scala-project && metals-direct start
+  metals-direct call list-modules '{}'
+  metals-direct call get-usages '{"fqcn":"com.example.Service.method","module":"core"}'
+  metals-direct call get-source '{"fqcn":"com.example.Service"}'
+
+state: $STATE_ROOT/<workspace-hash>/{pid,port,session,workspace,log}
+EOF
+    ;;
+  *) die "unknown subcommand: $1 (try --help)" ;;
+esac
