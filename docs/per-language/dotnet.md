@@ -82,6 +82,14 @@ force-recycle when a stale server drifts.
   BootServerSocket.
 - Single-project workspaces: most methods accept an optional `project`
   parameter; omit when there's only one `.csproj` in the workspace.
+- `run` with `--no-build` requires the matching configuration to be
+  pre-built. Example: if you built `dotnet-direct call build
+  {"configuration":"Release","noRestore":true}`, then `call run
+  {"configuration":"Release","extraArgs":["--no-build","--no-restore"]}`
+  succeeds; `call run {"extraArgs":["--no-build","--no-restore"]}`
+  without the `Release` configuration hint fails because dotnet run
+  defaults to Debug/net9.0/ which wasn't built. Pass
+  `"configuration": "<matches-your-build>"` to run.
 
 ## Network-sandbox interaction
 

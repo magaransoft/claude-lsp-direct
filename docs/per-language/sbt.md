@@ -20,9 +20,23 @@ coordinator lifetime. Every `call` rides the same JSON-RPC connection.
 - `call build-targets {}` → 3 targets (`root`, `root-test`,
   `root-build`) with capabilities `{canCompile, canTest, canRun}`.
 - `call compile {}` × 3 consecutive calls: 159ms / 196ms / 138ms;
-  coordinator PID unchanged across all three (persistent JVM
-  confirmed).
+  coordinator PID unchanged across all three (persistent JVM).
+- `call test {}` → `{statusCode: 1, originId: "sbt-direct-test-<ts>"}`.
+- `call run {target: "root"}` → `{statusCode: 1, originId: "sbt-direct-run-<ts>"}`.
+- `call clean {}` → `{cleaned: true}`.
 - `call sources {}` → 15 source-file entries across targets.
+- `call dependency-sources {}` → classpath items including Coursier
+  cache paths.
+- `call reload {}` → result null (BSP workspace/reload).
+- soft-reload on `touch build.sbt` mid-session → PID preserved,
+  coordinator log shows `[sbt-direct] bsp workspace/reload`.
+- error paths: `call run {}` (no target) → `{"error":"run requires
+  exactly one target"}`; `call compile {target:"does-not-exist"}` →
+  `{"error":"no build target matched \"does-not-exist\" (known:
+  root, root-test, root-build)"}`.
+- cold without `.bsp/sbt.json` → coordinator fatal log: `BSP
+  descriptor not found at <ws>/.bsp/sbt.json — run 'sbt bspConfig'
+  in the workspace first, or use the sbt-oneshot adapter`.
 
 ### Earlier attempt: sbt's own `sbt --client`
 
