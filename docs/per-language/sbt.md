@@ -1,18 +1,39 @@
 # sbt — `sbt-direct`
 
-Per-workspace sbt coordinator. Per-call subprocess mode: each `call`
-runs `sbt <task>` as a fresh subprocess. 20-40s per call (JVM boot +
-Ivy/Coursier resolution + task execution).
+Per-workspace sbt coordinator with two modes:
 
-A persistent-JVM path via sbt's thin client (`sbt --client`) was
-attempted and withdrawn — under Claude Bash (and in isolated
-reproductions on a real Play 3 project) sbt boots cleanly but
-`target/active.json` is never written, even with
-`-Dsbt.server.forcestart=true` and a `shell` subcommand. Root cause
-unconfirmed; candidates include sbt's tty detection, sandbox-
-suppressed file creation under the JVM's `java.io.tmpdir`, or
-plugin-specific interference. Until the adoption protocol is
-reproducible, per-call subprocess is the only sbt path.
+| mode | activation | cold first call | warm call | prereq |
+|---|---|---|---|---|
+| `oneshot` (default) | `SBT_DIRECT_MODE=oneshot` or unset | 20-40s | 20-40s | sbt on PATH |
+| `bsp` | `SBT_DIRECT_MODE=bsp` | 15-30s (JVM boot + BSP init) | sub-second (~150ms observed) | sbt on PATH + `sbt bspConfig` run once in the workspace |
+
+The bsp mode uses the Build Server Protocol (Scala-BSP 2.x). sbt writes
+`.bsp/sbt.json` describing how to launch itself in BSP server mode; the
+coordinator reads that descriptor, spawns the JVM, runs the BSP
+`build/initialize` handshake, and keeps the process alive for the
+coordinator lifetime. Every `call` rides the same JSON-RPC connection.
+
+### Verified smokes (fixtures/scala-sbt, BSP mode)
+
+- `sbt-direct start` under `SBT_DIRECT_MODE=bsp` — coordinator up in
+  ~15s on a warm Ivy cache.
+- `call build-targets {}` → 3 targets (`root`, `root-test`,
+  `root-build`) with capabilities `{canCompile, canTest, canRun}`.
+- `call compile {}` × 3 consecutive calls: 159ms / 196ms / 138ms;
+  coordinator PID unchanged across all three (persistent JVM
+  confirmed).
+- `call sources {}` → 15 source-file entries across targets.
+
+### Earlier attempt: sbt's own `sbt --client`
+
+An adapter using sbt's proprietary thin-client transport (watching for
+`target/active.json` + connecting via the ipcsocket) was tried first
+and withdrawn. `active.json` isn't written reliably under
+`-Dsbt.server.forcestart=true` across builds (tested against fixture +
+a real Play 3 project — sbt boots cleanly, reaches shell prompt,
+never writes the file). BSP sidesteps that entirely: `.bsp/sbt.json`
+is created via the explicit `sbt bspConfig` task and the protocol
+itself is documented + standardized across Scala build tools.
 
 ## Install prereq
 
@@ -41,11 +62,34 @@ sbt-direct tools                                  # full surface
 
 ## Method surface
 
+### oneshot mode
+
 | method  | params                                   | result                                        |
 |---------|------------------------------------------|-----------------------------------------------|
 | version | `{}`                                     | `{exit, signal, stdout, stderr}` from sbt --version |
 | reload  | `{}`                                     | `{exit, signal, stdout, stderr}` from sbt reload |
 | task    | `{task: "<name>", project?: "<module>"}` | `{exit, signal, stdout, stderr}` from `sbt <task>` or `sbt <project>/<task>` |
+
+### bsp mode
+
+Mapped to BSP 2.1.0-M1 methods. `target` accepts the build-target
+displayName (e.g. `"root"`, `"root-test"`) OR the full
+`file:///...#<name>/<conf>` uri.
+
+| method              | params                                       | wraps                       |
+|---------------------|----------------------------------------------|-----------------------------|
+| version             | `{}`                                         | workspace/buildTargets      |
+| build-targets       | `{}`                                         | workspace/buildTargets      |
+| compile             | `{target?: "<name>" \| "<uri>"}`             | buildTarget/compile         |
+| test                | `{target?, filter?: "<fqcn>"}`               | buildTarget/test            |
+| run                 | `{target: "<name>", args?: [string, ...]}`   | buildTarget/run             |
+| clean               | `{target?}`                                  | buildTarget/cleanCache      |
+| sources             | `{target?}`                                  | buildTarget/sources         |
+| dependency-sources  | `{target?}`                                  | buildTarget/dependencySources |
+| reload              | `{}`                                         | workspace/reload            |
+
+Omit `target` to apply to all build targets. Compile returns BSP
+`{statusCode}` (1 = OK, 2 = ERROR, 3 = CANCELLED).
 
 ## Timing
 

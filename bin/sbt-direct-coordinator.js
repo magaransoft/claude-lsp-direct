@@ -9,7 +9,6 @@ const path = require('path');
 const fs = require('fs');
 
 const { createProxy } = require('./tool-server-proxy.js');
-const { createAdapter } = require('./adapters/sbt-oneshot.js');
 
 function arg(name, def) {
   const i = process.argv.indexOf('--' + name);
@@ -22,11 +21,24 @@ const WORKSPACE = path.resolve(arg('workspace', process.cwd()));
 const PORT = parseInt(arg('port', '0'), 10);
 const TOOL_NAME = arg('tool-name', 'sbt-direct');
 const SBT_CMD = arg('sbt-cmd', 'sbt');
+// mode: oneshot (default) — per-call subprocess, no persistent JVM
+//       bsp — persistent sbt via Build Server Protocol. Requires a
+//       one-time `sbt bspConfig` in the workspace to generate
+//       .bsp/sbt.json (sbt auto-creates it on first compile/bspConfig).
+//       Warm calls sub-second; cold first init ~15-30s.
+const MODE = arg('mode', process.env.SBT_DIRECT_MODE || 'oneshot');
+const adapterModule = MODE === 'bsp'
+  ? './adapters/sbt-bsp.js'
+  : './adapters/sbt-oneshot.js';
+const { createAdapter } = require(adapterModule);
 
 if (!fs.existsSync(WORKSPACE)) die(`workspace does not exist: ${WORKSPACE}`);
 
+const adapterOpts = MODE === 'bsp'
+  ? { name: TOOL_NAME }
+  : { name: TOOL_NAME, sbtCmd: SBT_CMD };
 createProxy({
-  adapter: createAdapter({ name: TOOL_NAME, sbtCmd: SBT_CMD }),
+  adapter: createAdapter(adapterOpts),
   workspace: WORKSPACE,
   port: PORT,
   toolName: TOOL_NAME,
