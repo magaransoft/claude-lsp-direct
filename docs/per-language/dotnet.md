@@ -82,3 +82,27 @@ force-recycle when a stale server drifts.
   BootServerSocket.
 - Single-project workspaces: most methods accept an optional `project`
   parameter; omit when there's only one `.csproj` in the workspace.
+
+## Network-sandbox interaction
+
+`dotnet restore` reaches `api.nuget.org` to fetch packages. The Claude
+Bash default sandbox denies egress to nuget.org, so a cold `restore`
+under Claude Bash fails with
+`System.Net.Http.HttpRequestException: Resource temporarily unavailable`
+or `Failed to download ... from nuget.org`. Paths for resolution:
+
+- **Restore outside Claude Bash first.** Run `dotnet restore` once in a
+  regular terminal so `obj/project.assets.json` + the NuGet global
+  cache at `~/.nuget/packages/` are populated. Subsequent
+  `dotnet-direct call build` / `test` / `publish` from Claude Bash
+  reuse the warm cache without needing network.
+- **Pass `noRestore: true`** in `build` / `test` / `publish` params
+  when the cache is warm:
+  `dotnet-direct call build '{"noRestore":true}'`.
+- **Whitelist nuget.org** in `sandbox.network` in
+  `~/.claude/settings.json` if you prefer restore to work directly
+  (advanced — Claude Code docs cover the sandbox.network schema).
+
+The `version`, `info`, `build-server-shutdown`, and `command --list-sdks`
+methods don't touch the network and work from Claude Bash without any
+configuration.

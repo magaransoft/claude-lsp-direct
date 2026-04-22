@@ -77,5 +77,39 @@ features, which activate automatically.
 
 Git tags land at each step: `pre-refactor`, `refactor-wave-1`,
 `refactor-wave-2-step-{2,3,4,5}`, `refactor-wave-3-step-{6,7}`,
-`refactor-wave-4`. Reset to any of these if you need the previous
-state.
+`refactor-wave-4`, `refactor-wave-5`, `refactor-wave-6-{A,B}`. Reset
+to any of these if you need the previous state.
+
+### Wave-6 follow-up adjustments (subtle)
+
+Post-1.2.0 polish that doesn't change the headline contract:
+
+- `bin/tool-server-proxy.js` — `adapter.adopt()` Promise is now awaited
+  exactly once (prior pass called it via `Boolean(asyncFn(...))` which
+  treated the Promise as truthy + invoked adopt a second time,
+  assigning the Promise as `childSpecs`). Only `sbt-thin-client`
+  exercised this path; no other adapter was affected.
+- `bin/adapters/sbt-thin-client.js` — adoption probe changed from a 5s
+  `sbt --client about` handshake to a two-stage check: (1) trust
+  `target/active.json` if its mtime is <30min (on-disk evidence) (2)
+  fall back to a 30s probe for older slots.
+- `docs/per-language/sbt.md` — thin-client mode (`SBT_DIRECT_MODE=
+  thin-client`) marked EXPERIMENTAL. sbt's `target/active.json` isn't
+  written reliably under `-Dsbt.server.forcestart=true` across all
+  builds; oneshot (default) unaffected.
+- `docs/per-language/dotnet.md` — added § "Network-sandbox interaction"
+  describing the NuGet-restore-under-sandbox block and the warm-cache
+  / `noRestore:true` / sandbox.network whitelist resolution paths.
+- `hooks/prewarm-direct-wrappers.py` — excludes `metals-direct` (races
+  the IDE-spawned `metals-mcp`); probes backing-tool availability
+  before firing (skips slots whose backing tool is no longer installed);
+  stdout + stderr both discarded so SessionStart stays quiet.
+- `scripts/uninstall.sh` — added `CLAUDE="${CLAUDE:-$HOME/.claude}"`
+  env override so dry-runs can redirect against a scratch dir; sbt /
+  coursier / ivy / scala-build paths included in the sandbox-strip set;
+  prewarm SessionStart hook entry filtered out symmetrically.
+- `scripts/verify.sh` — `VERIFY_STRICT_SHA=1` env gates sha-mismatch
+  to FAIL (CI uses this). Default treats sha drift as warn-only so
+  downstream users on different pyright / tsserver / csharp-ls
+  versions don't false-fail the gate; structural-shape match
+  (top_level + total_nodes counts) is always a hard gate.
