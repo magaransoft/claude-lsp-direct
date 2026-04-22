@@ -48,6 +48,7 @@ probe python     py-direct      pyright-langserver         "$FIXTURES/python"   
 probe typescript ts-direct      typescript-language-server "$FIXTURES/typescript" hello.ts
 probe csharp     cs-direct      csharp-ls                  "$FIXTURES/csharp"     hello.cs
 probe vue        vue-direct     vue-language-server        "$FIXTURES/vue"        hello.vue
+probe java       java-direct    jdtls                      "$FIXTURES/java"       src/main/java/com/example/Hello.java
 # scala skipped here — metals-mcp fixture requires bloop import, non-trivial
 command -v metals-mcp >/dev/null && echo "[scala]  metals-mcp detected but skipped in verify (needs sbt project)" \
                                  || echo "[scala]  SKIP (metals-mcp not on PATH)"

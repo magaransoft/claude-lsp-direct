@@ -24,6 +24,7 @@ PLUGIN_BINARY_MAP = {
     "python":     ("pyright-lsp@claude-plugins-official",    "pyright-langserver"),
     "typescript": ("typescript-lsp@claude-plugins-official", "typescript-language-server"),
     "csharp":     ("csharp-lsp@claude-plugins-official",     "csharp-ls"),
+    "java":       ("jdtls-lsp@claude-plugins-official",      "jdtls"),
 }
 
 
@@ -59,6 +60,7 @@ LANG_DIRECT_WRAPPER = {
     "python":     ("py-direct", "pyright-langserver"),
     "typescript": ("ts-direct", "typescript-language-server"),
     "csharp":     ("cs-direct", "csharp-ls"),
+    "java":       ("java-direct", "jdtls"),
 }
 
 
@@ -103,6 +105,7 @@ CODE_EXT = {
     ".ts", ".tsx", ".js", ".jsx",
     ".cs",
     ".vue",
+    ".java",
 }
 EXT_LANG = {
     ".scala": "scala", ".sbt": "scala", ".sc": "scala",
@@ -110,6 +113,7 @@ EXT_LANG = {
     ".ts": "typescript", ".tsx": "typescript", ".js": "typescript", ".jsx": "typescript",
     ".cs": "csharp",
     ".vue": "vue",
+    ".java": "java",
 }
 
 # rg --type maps to extensions
@@ -118,6 +122,7 @@ RG_TYPE_LANG = {
     "ts": "typescript", "tsx": "typescript", "js": "typescript", "jsx": "typescript",
     "cs": "csharp", "csharp": "csharp",
     "vue": "vue",
+    "java": "java",
 }
 
 # patterns detected in shell command strings
@@ -127,7 +132,7 @@ FIND_NAME_RE = re.compile(r"""-(?:i?name|regex)\s+['"]*[^'"]*\*(\.\w+)['"]*""")
 RG_TYPE_RE = re.compile(r"""--type[=\s](\w+)""")
 RG_GLOB_RE = re.compile(r"""-g[=\s]['"]*\*(\.\w+)['"]*""")
 # positional code-file argument to grep/rg: "grep pattern path/to/file.scala"
-POS_CODE_FILE_RE = re.compile(r"""(?:^|\s)['"]?[^\s'"|&;<>]*(\.(?:scala|sbt|sc|py|ts|tsx|js|jsx|cs|vue))['"]?(?:\s|$)""")
+POS_CODE_FILE_RE = re.compile(r"""(?:^|\s)['"]?[^\s'"|&;<>]*(\.(?:scala|sbt|sc|py|ts|tsx|js|jsx|cs|vue|java))['"]?(?:\s|$)""")
 
 
 def lsp_suggestion(lang: str, avail: dict) -> Optional[str]:
@@ -166,7 +171,7 @@ def lsp_suggestion(lang: str, avail: dict) -> Optional[str]:
         if not info.get("backend"):
             missing.append("vue-language-server on PATH ('npm i -g @vue/language-server@3.2.6 @vue/typescript-plugin@3.2.6 typescript@5.9.3')")
         return f"[WARN not block] vue stack detected but missing: {', '.join(missing)}. grep allowed until installed."
-    if lang in {"python", "typescript", "csharp"}:
+    if lang in {"python", "typescript", "csharp", "java"}:
         # primary path after migration: direct wrapper (py-direct/ts-direct/cs-direct)
         wrapper_name, backend_bin = LANG_DIRECT_WRAPPER[lang]
         if info.get("tool") == wrapper_name and info.get("binary") and info.get("backend"):

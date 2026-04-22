@@ -67,10 +67,13 @@ def _write_plugins(home: Path, plugin_ids: list) -> None:
     ('find ~/x -name "*.cs"',                  "csharp"),
     ('find ~/x -name "*.vue"',                 "vue"),
     ('grep -l pattern ~/src/*.py',             "python"),
+    ('grep -rn foo ~/x --include="*.java"',    "java"),
+    ('rg --type java FooService ~/x',          "java"),
+    ('find ~/x -name "*.java"',                "java"),
 ])
 def test_blocks_when_lsp_available(fake_home, cmd, lang):
     # write fake direct-wrapper binaries so fallback treats all as ready
-    for name in ("vue-direct", "py-direct", "ts-direct", "cs-direct"):
+    for name in ("vue-direct", "py-direct", "ts-direct", "cs-direct", "java-direct"):
         (fake_home / ".claude" / "bin" / name).write_text("#!/bin/sh\nexit 0")
         (fake_home / ".claude" / "bin" / name).chmod(0o755)
     _write_availability(fake_home, {"lsps": {
@@ -79,6 +82,7 @@ def test_blocks_when_lsp_available(fake_home, cmd, lang):
         "typescript": {"tool":"ts-direct","binary":str(fake_home / ".claude" / "bin" / "ts-direct"),"backend":"typescript-language-server","workspace":"/w"},
         "csharp":     {"tool":"cs-direct","binary":str(fake_home / ".claude" / "bin" / "cs-direct"),"backend":"csharp-ls","workspace":"/w"},
         "vue":        {"tool":"vue-direct","binary":str(fake_home / ".claude" / "bin" / "vue-direct"),"backend":"vue-language-server","workspace":"/w"},
+        "java":       {"tool":"java-direct","binary":str(fake_home / ".claude" / "bin" / "java-direct"),"backend":"jdtls","workspace":"/w"},
     }})
     rc, _, err = _run(_bash(cmd), fake_home)
     assert rc == 2
@@ -178,9 +182,12 @@ def _grep_tool(pattern: str = "foo", **kw) -> dict:
     ({"path": "/tmp/App.tsx"},    "typescript"),
     ({"path": "/tmp/Foo.cs"},     "csharp"),
     ({"path": "/tmp/App.vue"},    "vue"),
+    ({"type": "java"},            "java"),
+    ({"glob": "**/*.java"},       "java"),
+    ({"path": "/tmp/Foo.java"},   "java"),
 ])
 def test_native_grep_blocks_when_lsp_available(fake_home, kw, lang):
-    for name in ("vue-direct", "py-direct", "ts-direct", "cs-direct"):
+    for name in ("vue-direct", "py-direct", "ts-direct", "cs-direct", "java-direct"):
         (fake_home / ".claude" / "bin" / name).write_text("#!/bin/sh\nexit 0")
         (fake_home / ".claude" / "bin" / name).chmod(0o755)
     _write_availability(fake_home, {"lsps": {
@@ -189,6 +196,7 @@ def test_native_grep_blocks_when_lsp_available(fake_home, kw, lang):
         "typescript": {"tool":"ts-direct","binary":str(fake_home / ".claude" / "bin" / "ts-direct"),"backend":"typescript-language-server","workspace":"/w"},
         "csharp":     {"tool":"cs-direct","binary":str(fake_home / ".claude" / "bin" / "cs-direct"),"backend":"csharp-ls","workspace":"/w"},
         "vue":        {"tool":"vue-direct","binary":str(fake_home / ".claude" / "bin" / "vue-direct"),"backend":"vue-language-server","workspace":"/w"},
+        "java":       {"tool":"java-direct","binary":str(fake_home / ".claude" / "bin" / "java-direct"),"backend":"jdtls","workspace":"/w"},
     }})
     rc, _, err = _run(_grep_tool(**kw), fake_home)
     assert rc == 2
@@ -218,9 +226,10 @@ def test_native_grep_passthrough(fake_home, kw):
     ('rg pattern ~/src/App.tsx',   "typescript"),
     ('grep -n class /tmp/Foo.cs',  "csharp"),
     ('grep -n ref /tmp/App.vue',   "vue"),
+    ('grep -n class /tmp/Hello.java', "java"),
 ])
 def test_bash_blocks_positional_code_file(fake_home, cmd, lang):
-    for name in ("vue-direct", "py-direct", "ts-direct", "cs-direct"):
+    for name in ("vue-direct", "py-direct", "ts-direct", "cs-direct", "java-direct"):
         (fake_home / ".claude" / "bin" / name).write_text("#!/bin/sh\nexit 0")
         (fake_home / ".claude" / "bin" / name).chmod(0o755)
     _write_availability(fake_home, {"lsps": {
@@ -229,6 +238,7 @@ def test_bash_blocks_positional_code_file(fake_home, cmd, lang):
         "typescript": {"tool":"ts-direct","binary":str(fake_home / ".claude" / "bin" / "ts-direct"),"backend":"typescript-language-server","workspace":"/w"},
         "csharp":     {"tool":"cs-direct","binary":str(fake_home / ".claude" / "bin" / "cs-direct"),"backend":"csharp-ls","workspace":"/w"},
         "vue":        {"tool":"vue-direct","binary":str(fake_home / ".claude" / "bin" / "vue-direct"),"backend":"vue-language-server","workspace":"/w"},
+        "java":       {"tool":"java-direct","binary":str(fake_home / ".claude" / "bin" / "java-direct"),"backend":"jdtls","workspace":"/w"},
     }})
     rc, _, err = _run(_bash(cmd), fake_home)
     assert rc == 2

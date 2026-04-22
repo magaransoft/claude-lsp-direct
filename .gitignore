@@ -23,6 +23,10 @@ fixtures/**/bin/
 fixtures/**/dist/
 fixtures/**/.bloop/
 fixtures/**/target/
+# eclipse jdt.ls writes these into the java fixture on first start
+fixtures/java/.classpath
+fixtures/java/.project
+fixtures/java/.settings/
 
 # local state (user-owned, not repo data)
 .claude/

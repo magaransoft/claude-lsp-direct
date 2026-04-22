@@ -12,6 +12,7 @@ Each supported language has a bash wrapper in `bin/` that proxies its LSP over p
 | python | `py-direct` | pyright-langserver | `pyrightconfig.json` > `pyproject.toml` > `setup.cfg` > `setup.py` |
 | typescript | `ts-direct` | typescript-language-server | `tsconfig.json` > `package.json` |
 | csharp | `cs-direct` | csharp-ls | `.slnx` > `.sln` > `.csproj` |
+| java | `java-direct` | jdtls (Eclipse JDT.LS) | `pom.xml` > `build.gradle.kts` > `build.gradle` > `settings.gradle.kts` > `settings.gradle` > `.project` |
 
 ## Invariants
 

@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# java-direct — proxy jdtls (Eclipse JDT.LS) over persistent HTTP; per-workspace isolation; LSP-workaround convention per rules/lsp.md
+# subcommands: start [workspace] | call <method> <json-params> [workspace] | stop [workspace] | status | tools [workspace]
+set -euo pipefail
+
+STATE_ROOT="${JAVA_DIRECT_STATE:-$HOME/.cache/java-direct}"
+PROXY="$HOME/.claude/bin/lsp-stdio-proxy.js"
+LSP_BIN="jdtls"
+LANG_ID="java"
+WORKSPACE_MARKERS=(pom.xml build.gradle.kts build.gradle settings.gradle.kts settings.gradle .project)
+
+die() { echo "java-direct: $*" >&2; exit 1; }
+
+resolve_workspace() {
+  local ws="${1:-}"
+  if [ -n "$ws" ]; then ws="$(cd "$ws" && pwd)"; echo "$ws"; return; fi
+  ws="$PWD"
+  while [ "$ws" != "/" ]; do
+    for marker in "${WORKSPACE_MARKERS[@]}"; do
+      [ -e "$ws/$marker" ] && { echo "$ws"; return; }
+    done
+    ws="$(dirname "$ws")"
+  done
+  echo "$PWD"
+}
+
+state_dir() {
+  local hash
+  hash="$(printf '%s' "$1" | shasum | awk '{print $1}' | cut -c1-12)"
+  echo "$STATE_ROOT/$hash"
+}
+
+free_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
+state_get() { [ -f "$1/$2" ] && cat "$1/$2" || echo ""; }
+
+port_ready() {
+  curl -fsS -m 2 "http://127.0.0.1:$1/health" >/dev/null 2>&1
+}
+
+server_alive() {
+  local port; port="$(state_get "$1" port)"
+  [ -z "$port" ] && return 1
+  port_ready "$port"
+}
+
+cmd_start() {
+  command -v "$LSP_BIN" >/dev/null || die "$LSP_BIN not on PATH — install jdtls (brew install jdtls; requires JDK 17+)"
+  [ -f "$PROXY" ] || die "proxy missing: $PROXY"
+  local ws dir port pid
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  mkdir -p "$dir"
+  if server_alive "$dir"; then
+    echo "already running: workspace=$ws port=$(state_get "$dir" port) pid=$(state_get "$dir" pid)"
+    return 0
+  fi
+  port="$(free_port)"
+  echo "$ws" > "$dir/workspace"
+  echo "$port" > "$dir/port"
+  # jdtls needs a per-workspace -data dir (Eclipse workspace metadata); scope under our state hash for clean stop
+  local lsp_args=(-data "$dir/jdt-data")
+  nohup node "$PROXY" --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${lsp_args[@]}" >"$dir/log" 2>&1 &
+  pid=$!
+  echo "$pid" > "$dir/pid"
+  local i=0
+  until port_ready "$port"; do
+    sleep 1
+    i=$((i+1))
+    [ "$i" -ge 180 ] && { kill "$pid" 2>/dev/null; die "proxy did not bind port $port within 180s — check $dir/log"; }
+  done
+  echo "started: workspace=$ws port=$port pid=$pid state=$dir"
+}
+
+cmd_call() {
+  local method="${1:-}"; shift || true
+  local params_json="${1-}"; shift || true
+  [ -z "$params_json" ] && params_json='{}'
+  [ -z "$method" ] && die "usage: java-direct call <method> '<json-params>' [workspace]"
+  local ws dir port
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  local payload
+  payload="$(jq -cn --arg method "$method" --argjson params "$params_json" '{method:$method,params:$params}')"
+  curl -fsS -m 120 "http://localhost:$port/lsp" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "lsp call failed"
+  echo
+}
+
+cmd_tools() {
+  cat <<EOF
+java-direct exposes raw LSP methods (jdtls / Eclipse JDT.LS surface).
+invoke: java-direct call <method> '<json-params>' [workspace]
+
+common methods:
+  textDocument/documentSymbol       outline of a .java file
+  textDocument/hover                type + javadoc at position
+  textDocument/definition           jump to definition
+  textDocument/references           find references
+  textDocument/typeDefinition       jump to type
+  textDocument/implementation       find implementations
+  textDocument/completion           completions at position
+  textDocument/signatureHelp        call signature
+  textDocument/prepareCallHierarchy get call-hierarchy handle
+  callHierarchy/incomingCalls       callers
+  callHierarchy/outgoingCalls       callees
+  workspace/symbol                  fuzzy search across workspace
+
+params MUST include textDocument.uri as file://<abs-path> for textDocument/* methods.
+note: jdtls runs a background "Building workspace" job after start — workspace/symbol may return empty until it completes (typically 5-15s on small projects, longer on Maven/Gradle imports).
+
+example:
+  java-direct call textDocument/documentSymbol '{"textDocument":{"uri":"file:///path/to/Hello.java"}}'
+EOF
+}
+
+cmd_stop() {
+  local ws dir pid
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  pid="$(state_get "$dir" pid)"
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null && echo "stopped: pid=$pid workspace=$ws" || echo "kill failed (pid=$pid) — state cleared for $ws"
+  else
+    echo "no pid for $ws"
+  fi
+  rm -f "$dir/pid" "$dir/port"
+}
+
+cmd_status() {
+  [ -d "$STATE_ROOT" ] || { echo "no servers tracked"; return; }
+  local any=0
+  for dir in "$STATE_ROOT"/*/; do
+    [ -d "$dir" ] || continue
+    any=1
+    local ws pid port alive
+    ws="$(state_get "$dir" workspace)"
+    pid="$(state_get "$dir" pid)"
+    port="$(state_get "$dir" port)"
+    alive="dead"
+    [ -n "$port" ] && port_ready "$port" && alive="alive"
+    printf 'workspace=%s  port=%s  pid=%s  %s\n' "$ws" "$port" "$pid" "$alive"
+  done
+  [ "$any" = 0 ] && echo "no servers tracked"
+}
+
+case "${1:-}" in
+  start)  shift; cmd_start "$@" ;;
+  call)   shift; cmd_call "$@" ;;
+  tools)  shift; cmd_tools "$@" ;;
+  stop)   shift; cmd_stop "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  ""|-h|--help)
+    cat <<EOF
+java-direct — proxy jdtls (Eclipse JDT.LS) over persistent HTTP; one server per workspace
+
+usage:
+  java-direct start [workspace]                 spawn proxy for workspace (default: cwd walking up for pom.xml/build.gradle/settings.gradle/.project)
+  java-direct call <method> '<json-params>' [ws]  issue raw LSP method — auto-starts server
+  java-direct tools                             list LSP method surface
+  java-direct stop [workspace]                  kill server for workspace
+  java-direct status                            show all tracked servers
+
+workspace markers (walk-up order): ${WORKSPACE_MARKERS[*]}
+
+state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log}
+jdt-data (Eclipse workspace metadata): $STATE_ROOT/<workspace-hash>/jdt-data/
+
+prereqs:
+  brew install jdtls    # ships launcher script + Eclipse JDT.LS
+  java >= 17            # JDK, not just JRE
+EOF
+    ;;
+  *) die "unknown subcommand: $1 (try --help)" ;;
+esac

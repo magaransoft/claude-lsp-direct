@@ -1,6 +1,6 @@
 # claude-lsp-direct
 
-Per-workspace LSP proxies over HTTP for **Python**, **TypeScript / JavaScript**, **C#**, **Vue**, **Scala**. Sub-100ms steady-state; sidesteps the per-tool-call round-trip that agent harnesses pay. Per-workspace isolation fixes servers that bind `rootUri` at init (e.g. `csharp-ls`).
+Per-workspace LSP proxies over HTTP for **Python**, **TypeScript / JavaScript**, **C#**, **Vue**, **Scala**, **Java**. Sub-100ms steady-state; sidesteps the per-tool-call round-trip that agent harnesses pay. Per-workspace isolation fixes servers that bind `rootUri` at init (e.g. `csharp-ls`).
 
 Extends the pattern Angel Blanco ([@NovaMage](https://github.com/NovaMage)) first demonstrated for Scala in [agents-metals-direct-lsp](https://github.com/NovaMage/agents-metals-direct-lsp) across the full set of language servers common in multi-stack monorepos.
 
@@ -21,11 +21,13 @@ Direct-wrapper numbers measured 2026-04-21 on macOS 26.4.1 arm64 (see *Tested ve
 | csharp | my measurement, `LSP()` tool * | ~9s (empty) | ~10s (empty) | 30-120s † | 0.07s | rootUri fix + **~130× warm** |
 | vue | unsupported ‡ | — | — | 6.6s | 0.09s | enables capability |
 | scala | [Angel Blanco benchmark](https://github.com/anthropics/claude-code/issues/45132#issuecomment-3492812921), Claude MCP/stdio | 10.7s | ~6.3s avg | 0.14s § | 0.08s | **~80×** (his direct-HTTP baseline: 0.038s, essentially the same) |
+| java | my measurement, `LSP()` tool (`jdtls-lsp@claude-plugins-official`) | ~9s ¶ | ~9s ¶ | 0.91s | 0.085s | **~100×** |
 
 \* `csharp-ls` bound to wrong `rootUri` (cwd outside `.sln` ancestor) returns empty in ~9-10s.
 † cs-direct cold = MSBuild solution load + NuGet restore. Amortized across the session.
 ‡ Vue LS v3 is hybrid-mandatory (needs paired tsserver + `@vue/typescript-plugin`); Claude Code's plugin loader can't host the paired setup, so native `LSP()` on `.vue` isn't available.
 § metals-direct cold of 0.14s is the server-adoption path (reuses an existing `metals-mcp` via `<workspace>/.metals/mcp.json`); fresh cold with Bloop re-import is 30-120s.
+¶ java "before" matches the documented `LSP()` tool harness round-trip floor (~8-9s per invocation); `jdtls-lsp@claude-plugins-official` plugin pools the server but each call still pays the per-tool-turn cost. java-direct cold of 0.91s is the first call after `start` (Eclipse "Building workspace" job runs in background); subsequent calls steady at ~85ms. On a real Maven/Gradle project, expect cold of 30-120s on first start (dependency resolution), then sub-100ms warm.
 
 The point isn't the specific numbers — it's the order-of-magnitude gap between a persistent HTTP proxy and the minimum cost of a per-call tool turn.
 
@@ -49,7 +51,7 @@ CLI → <lang>-direct (bash)
 
 Full spec: [`docs/convention.md`](docs/convention.md) · [`docs/architecture.md`](docs/architecture.md) · [`docs/troubleshooting.md`](docs/troubleshooting.md)
 
-Per-language: [Python](docs/per-language/python.md) · [TypeScript](docs/per-language/typescript.md) · [C#](docs/per-language/csharp.md) · [Vue](docs/per-language/vue.md) · [Scala](docs/per-language/scala.md)
+Per-language: [Python](docs/per-language/python.md) · [TypeScript](docs/per-language/typescript.md) · [C#](docs/per-language/csharp.md) · [Vue](docs/per-language/vue.md) · [Scala](docs/per-language/scala.md) · [Java](docs/per-language/java.md)
 
 ## Quickstart
 
@@ -86,6 +88,8 @@ Exact versions this was developed and benchmarked against. Other versions likely
 | @vue/typescript-plugin | 3.2.6 |
 | csharp-ls | 0.24.0.0 |
 | metals-mcp | 1.6.7 (Angel's benchmark); `brew install metals` (latest) otherwise |
+| jdtls | 1.58.0 (`brew install jdtls`) |
+| OpenJDK | 21.0.5 LTS (Corretto) — any JDK 17+ works |
 | .NET SDK | 9.x recommended (10.x has an MSBuild BuildHost pipe issue with csharp-ls on macOS — see [csharp docs](docs/per-language/csharp.md)) |
 
 If you're running different versions, `scripts/verify.sh` is the quickest way to confirm the wrapper still works end-to-end on your stack.
@@ -110,7 +114,7 @@ Happy to chat if any of this is under consideration or if the patterns here woul
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Adding a language is usually a ~100 LOC bash wrapper + fixture + doc page + CI entry. PRs welcome for Go, Rust, Ruby, Java, Kotlin, Swift, Elixir, …
+See [CONTRIBUTING.md](CONTRIBUTING.md). Adding a language is usually a ~100 LOC bash wrapper + fixture + doc page + CI entry. PRs welcome for Go, Rust, Ruby, Kotlin, Swift, Elixir, …
 
 ## License
 
