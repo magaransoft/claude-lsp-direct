@@ -1,0 +1,12 @@
+{
+  "cold_ms": 1206,
+  "lang": "python",
+  "note": null,
+  "response_body_sha256": "9f38a6f30ecff89835c38859b554be190bf3b41788476cf9de636531d6753242",
+  "response_shape_summary": {
+    "error": "parse: Expecting value: line 1 column 1 (char 0)"
+  },
+  "status": "OK",
+  "warm_ms": 72,
+  "wrapper": "py-direct"
+}
