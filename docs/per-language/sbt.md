@@ -1,11 +1,24 @@
 # sbt — `sbt-direct`
 
-Per-workspace sbt coordinator with two modes:
+Per-workspace sbt coordinator. Default mode is **auto**: on `start`,
+the coordinator probes `<workspace>/.bsp/sbt.json` and selects:
 
-| mode | activation | cold first call | warm call | prereq |
-|---|---|---|---|---|
-| `oneshot` (default) | `SBT_DIRECT_MODE=oneshot` or unset | 20-40s | 20-40s | sbt on PATH |
-| `bsp` | `SBT_DIRECT_MODE=bsp` | 15-30s (JVM boot + BSP init) | sub-second (~150ms observed) | sbt on PATH + `sbt bspConfig` run once in the workspace |
+| detected state | selected mode | cold first call | warm call |
+|---|---|---|---|
+| `.bsp/sbt.json` present | `bsp` (persistent JVM) | 15-30s (JVM boot + BSP init) | **~130ms** |
+| `.bsp/sbt.json` absent | `oneshot` (per-call subprocess) | 4-5s | 3-4s |
+
+`bsp` mode is strictly faster whenever it's available. If your
+workspace doesn't have `.bsp/sbt.json`, run `sbt bspConfig` once to
+generate it — every subsequent `sbt-direct call` in that workspace
+switches to the warm path automatically.
+
+Override auto-detection with `SBT_DIRECT_MODE=bsp` (force; errors if
+descriptor absent) or `SBT_DIRECT_MODE=oneshot` (force; useful only
+for a deliberate test of the fallback path).
+
+Prereq for either mode: `sbt` on `PATH`. `bsp` adds the one-time
+`sbt bspConfig` step per workspace.
 
 The bsp mode uses the Build Server Protocol (Scala-BSP 2.x). sbt writes
 `.bsp/sbt.json` describing how to launch itself in BSP server mode; the
