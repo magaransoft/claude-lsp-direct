@@ -54,11 +54,15 @@ function freePort() {
 // serveHttp — loopback HTTP server exposing GET /health and POST
 // /call (canonical) + POST /lsp (back-compat alias for existing
 // wrappers). The caller supplies onCall({method, params}) → Promise<any>.
-function serveHttp(port, { onCall, meta }) {
+function serveHttp(port, { onCall, meta, statusFn }) {
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
+      let extra = {};
+      if (typeof statusFn === 'function') {
+        try { extra = statusFn() || {}; } catch (e) { extra = { statusError: e.message }; }
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, ...(meta || {}) }));
+      res.end(JSON.stringify({ ok: true, ...(meta || {}), ...extra }));
       return;
     }
     if (req.method === 'POST' && (req.url === '/call' || req.url === '/lsp')) {

@@ -267,11 +267,21 @@ Why each sandbox write is needed:
   extracts JNI native libraries here on first jdtls start. One-time
   write, then read-only. Standard Eclipse-tooling path; same dir
   VSCode-Java, IntelliJ Eclipse plugin, etc. write to.
-- `/private/var/folders/**/.sbt/**`, `~/.sbt/**`, `~/.ivy2/**`,
-  `~/.coursier/**` — only for `sbt-direct`. sbt's BootServerSocket is
-  created under the macOS per-user tmpdir regardless of `$TMPDIR` env,
-  and Ivy/Coursier cache dependency jars here on first resolve. Native
-  sbt behavior; same dirs any Scala toolchain writes to.
+- `/private/var/folders/**/T/.sbt*/**`, `/private/var/folders/**/.sbt/**`,
+  `~/.sbt/**`, `~/.ivy2/**`, `~/.coursier/**` — for `sbt-direct`
+  dependency-cache writes (Ivy/Coursier resolve on first build) and
+  per-invocation sbt tmpdirs (`.sbt<digits>/`). **Neither oneshot nor
+  bsp mode runs under Claude's Bash sandbox on macOS**: both dlopen a
+  native dylib at runtime (bsp → `libsbtipcsocket*.dylib`, oneshot →
+  `libswoval-files*.dylib` via sbt's `FileTreeRepository`), and macOS
+  governs dylib load via `process-exec*` policy — orthogonal to
+  `file-write*` allowWrite globs. The realpath-twin prefix
+  (`/var/folders/**/...` alongside `/private/var/folders/**/...`) was
+  tested 2026-04-22 and also RED. For either mode, call `sbt-direct`
+  with `dangerouslyDisableSandbox: true`. Verified GREEN 2026-04-22
+  with Claude Bash `/sandbox disabled`: oneshot boots cleanly, no
+  "Operation not permitted", no swoval dylib denial; sbt resolves
+  project + runner versions as expected. See `docs/per-language/sbt.md`.
 - `/private/var/folders/**/.scala-build/**` — only for Scala CLI /
   scala-cli users; safe no-op if you don't use it.
 

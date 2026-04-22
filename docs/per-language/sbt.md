@@ -143,10 +143,11 @@ The JVM uses the macOS per-user tmp dir (`/private/var/folders/.../T/`)
 for sbt's BootServerSocket regardless of shell `$TMPDIR`, and for
 dependency-cache writes during Ivy / Coursier resolution. Claude
 Bash default sandbox denies writes there. `scripts/install.sh` pre-
-allows the minimum set automatically:
+allows the dependency-cache paths automatically:
 
 ```json
 "sandbox": { "filesystem": { "allowWrite": [
+  "/private/var/folders/**/T/.sbt*/**",
   "/private/var/folders/**/.sbt/**",
   "~/.sbt/**",
   "~/.ivy2/**",
@@ -154,19 +155,31 @@ allows the minimum set automatically:
 ]}}
 ```
 
-With `install.sh` run, sbt-direct works under Claude Bash without any
-per-call bypass flag. Verified against a real multi-module Play 3 /
-Scala 3 project: `sbt-direct call version` reads the project's
-`build.sbt` correctly; `sbt-direct call task
-{"task":"scalafmtCheckAll"}` runs the sbt-scalafmt plugin end-to-end
-and surfaces per-file formatting diffs.
+`allowWrite` is **not** sufficient for either mode on macOS. Both
+`bsp` and `oneshot` load a native dylib at runtime:
 
-Users who don't run `install.sh` (stand-alone deployment, bespoke
-sandbox config) can either merge the same entries into their
-`~/.claude/settings.json` manually, or call sbt-direct with
-`dangerouslyDisableSandbox: true`. The coordinator, bash wrapper, and
-adapter are all sandbox-neutral — the socket write is the only
-block, and it's strictly in sbt's own boot code.
+- `bsp` loads `libsbtipcsocket*.dylib` (ipcsocket for persistent server).
+- `oneshot` loads `libswoval-files*.dylib` (swoval file-watcher used by
+  sbt's `FileTreeRepository` during project load).
+
+Both extractions call `Files.createTempFile` under the per-user tmpdir
+(`/var/folders/.../T/.sbt<digits>/swoval/...` or `.../sbtipcsocket/...`)
+and then `System.load`. macOS sandbox-exec governs `dlopen` via
+`process-exec*` policy, orthogonal to `file-write*`. Adding
+`allowWrite` globs for the tmp path — including the realpath twin
+(`/var/folders/**/T/.sbt*/**` alongside the `/private/var/folders/...`
+prefix) — does NOT rescue the load; denial happens at dylib-exec time,
+not at file-create time. Verified 2026-04-22 — both bsp (prior session) and
+oneshot (this session with twin-prefix glob active) RED at same error
+signature class.
+
+Call sbt-direct with `dangerouslyDisableSandbox: true` for either
+mode. There is no sandbox-compatible sbt path on macOS.
+
+Verified GREEN 2026-04-22 with Claude Bash `/sandbox disabled`:
+`SBT_DIRECT_MODE=oneshot sbt-direct call version '{}' <ws>` against a
+real Play/Scala workspace boots sbt cleanly, resolves project +
+runner versions, no dylib "Operation not permitted" in stderr.
 
 ## State directory
 

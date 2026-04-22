@@ -163,6 +163,18 @@ async function createProxy({ adapter, workspace, port, toolName }) {
   let invalidationFiredOnLastCall = false;
   const server = serveHttp(port, {
     meta: { workspace, toolName, adopted },
+    statusFn: () => {
+      const list = Object.entries(children).map(([id, c]) => ({
+        id,
+        pid: c.proc.pid,
+        alive: c.proc.exitCode === null && !c.proc.killed,
+        exitCode: c.proc.exitCode,
+      }));
+      return {
+        children: list,
+        childrenAlive: list.every(c => c.alive),
+      };
+    },
     async onCall({ method, params }) {
       const t0 = Date.now();
       invalidationFiredOnLastCall = false;
