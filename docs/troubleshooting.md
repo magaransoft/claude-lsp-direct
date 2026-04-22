@@ -64,6 +64,20 @@ Track progress at https://github.com/razzmatazz/csharp-language-server/issues.
 
 **Fix:** Use `bin/vue-direct` (not the generic `lsp-stdio-proxy.js`). `vue-direct` dispatches to `vue-direct-coordinator.js` which spawns both children and bridges them correctly.
 
+## jdtls fails on first start with `~/.eclipse: Operation not permitted`
+**Symptom:** `java-direct start` exits within seconds, log shows `java.nio.file.FileSystemException: ~/.eclipse: Operation not permitted` followed by an Eclipse Equinox stack trace ending with `jdtls exited 15 null`.
+
+**Reason:** The Eclipse Equinox launcher extracts JNI native libraries into `~/.eclipse/` on first run. Sandboxed environments (Claude Code's macOS sandbox is one) deny writes to that path unless explicitly allowed.
+
+**Fix:** allow writes to `~/.eclipse` and `~/.cache/java-direct` in the sandbox config. For Claude Code, add both to `Filesystem.write.allowOnly` in `~/.claude/settings.json`. After first successful start, `~/.eclipse` is populated and the issue does not recur.
+
+## jdtls `workspace/symbol` returns empty right after start
+**Symptom:** `java-direct start` succeeds, `textDocument/documentSymbol` works, but `workspace/symbol '{"query":"X"}'` returns `[]` for a class you can clearly see.
+
+**Reason:** jdtls runs an asynchronous "Building workspace" job after init. `workspace/symbol` indexes via that job; the rest of the LSP surface answers immediately from per-file parsing. On a small project the job settles in 5-15s; on a real Maven/Gradle project with transitive deps it can take 30-120s.
+
+**Fix:** wait, then retry. For scripts, poll on `workspace/symbol` with a known sentinel symbol until you see a non-empty result.
+
 ## Workspace not detected
 **Symptom:** `<lang>-direct start` picks the wrong workspace or says "no workspace found".
 
