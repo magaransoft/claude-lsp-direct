@@ -83,6 +83,15 @@ cmd_start() {
     i=$((i+1))
     [ "$i" -ge "$timeout" ] && { kill "$pid" 2>/dev/null; die "coordinator did not bind port $port within ${timeout}s — check $dir/log"; }
   done
+  # /health reports childrenAlive — catches coordinator binding its HTTP port
+  # before the child sbt JVM died (bsp mode). oneshot has no persistent child
+  # so childrenAlive is trivially true on empty list.
+  local health
+  health="$(curl -fsS -m 2 "http://127.0.0.1:$port/health" 2>/dev/null || true)"
+  if [ -n "$health" ] && [ "$(echo "$health" | jq -r '.childrenAlive // true')" = "false" ]; then
+    kill "$pid" 2>/dev/null
+    die "coordinator bound port $port but child exited — check $dir/log (health: $health)"
+  fi
   echo "started: workspace=$ws port=$port pid=$pid state=$dir"
 }
 
