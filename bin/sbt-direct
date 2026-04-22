@@ -8,12 +8,15 @@ set -euo pipefail
 STATE_ROOT="${SBT_DIRECT_STATE:-$HOME/.cache/sbt-direct}"
 COORDINATOR="$HOME/.claude/bin/sbt-direct-coordinator.js"
 WORKSPACE_MARKERS=(build.sbt build.sc build.mill project/build.properties)
-# SBT_DIRECT_MODE=oneshot (default) | bsp
-#   oneshot: each /call spawns fresh `sbt <task>` (20-40s each).
-#   bsp: persistent sbt via Build Server Protocol (`.bsp/sbt.json`
-#        launch descriptor). Cold init ~15-30s; warm calls sub-second.
-#        Requires `sbt bspConfig` run once in the workspace.
-SBT_MODE="${SBT_DIRECT_MODE:-oneshot}"
+# SBT_DIRECT_MODE=auto (default) | bsp | oneshot
+#   auto: coordinator probes <workspace>/.bsp/sbt.json. If present → bsp
+#         mode (warm calls <200ms). If absent → oneshot (20-40s per call),
+#         with a log message telling the user to run `sbt bspConfig`.
+#   bsp: force Build Server Protocol mode. Errors if .bsp/sbt.json absent.
+#   oneshot: force per-call subprocess. Slower than bare sbt; kept as a
+#            fallback for projects without BSP and as an integration test
+#            path.
+SBT_MODE="${SBT_DIRECT_MODE:-auto}"
 
 die() { echo "sbt-direct: $*" >&2; exit 1; }
 
@@ -69,10 +72,11 @@ cmd_start() {
   nohup node "$COORDINATOR" --tool-name sbt-direct --mode "$SBT_MODE" --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
-  # bsp mode waits for sbt JVM boot + BSP initialize (15-30s warm,
-  # up to 120s on fresh ivy/coursier cache). oneshot binds immediately.
+  # bsp + auto modes wait for sbt JVM boot + BSP initialize (15-30s
+  # warm, up to 120s on fresh ivy/coursier cache). Pure oneshot binds
+  # immediately since no persistent child spawns.
   local timeout=30
-  [ "$SBT_MODE" = "bsp" ] && timeout=120
+  [ "$SBT_MODE" != "oneshot" ] && timeout=120
   local i=0
   until port_ready "$port"; do
     sleep 1

@@ -119,9 +119,10 @@ of one cold + two warm runs.
 ### Where direct wrappers don't help (or hurt)
 
 - **sbt oneshot mode** — no persistence, so it strictly adds
-  coordinator overhead on top of bare sbt. Exists only as a fallback
-  for when BSP isn't configured in the workspace. **Use `bsp` mode
-  (`SBT_DIRECT_MODE=bsp`) whenever possible.**
+  coordinator overhead on top of bare sbt. Only hit when `.bsp/sbt.json`
+  is absent in the workspace. `sbt-direct`'s **auto mode** (default)
+  detects this at start and prints a log line pointing at
+  `sbt bspConfig` to switch to the warm path.
 - **dotnet-direct** — MSBuild's build-server gives bare dotnet the
   same warm-path benefit. Direct wrapper is within 2× of bare;
   shipping it is about uniform CLI contract + `calls.log` observability,
