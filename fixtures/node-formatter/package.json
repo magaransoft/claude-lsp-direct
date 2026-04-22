@@ -2,5 +2,6 @@
   "name": "node-formatter-fixture",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "description": "smoke fixture for prettier-direct + eslint-direct"
 }
