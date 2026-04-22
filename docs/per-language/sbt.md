@@ -5,7 +5,14 @@ Per-workspace sbt coordinator with two modes:
 | mode | activation | cold call | warm call | requires |
 |---|---|---|---|---|
 | `oneshot` (default) | `SBT_DIRECT_MODE=oneshot` or unset | 20-40s | 20-40s | sbt on PATH |
-| `thin-client` | `SBT_DIRECT_MODE=thin-client` | 20-40s (first call boots server) | 200-500ms (`sbt --client`) | sbt on PATH + `install.sh` allowlist (or `dangerouslyDisableSandbox`) |
+| `thin-client` (experimental) | `SBT_DIRECT_MODE=thin-client` | 20-40s (first call boots server) | 200-500ms (`sbt --client`) | sbt on PATH + `install.sh` allowlist (or `dangerouslyDisableSandbox`) |
+
+> **thin-client mode is experimental.** `target/active.json` detection is
+> unreliable across sbt configurations — builds with certain plugin
+> combinations don't write the file under `-Dsbt.server.forcestart=true`,
+> and the coordinator's 90s init timeout may elapse with no server
+> available. If thin-client mode fails for your project, fall back to
+> oneshot (default) while the adoption protocol is hardened.
 
 The thin-client adapter keeps a persistent sbt server alive per
 workspace. On start, the coordinator spawns `sbt` with

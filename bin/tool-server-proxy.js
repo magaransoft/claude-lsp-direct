@@ -29,11 +29,16 @@ async function createProxy({ adapter, workspace, port, toolName }) {
   const logCall = callLog(dir);
   const events = new EventEmitter();
 
-  // spawn or adopt child processes per adapter
-  const adopted = Boolean(adapter.adopt && adapter.adopt(workspace, dir));
-  const childSpecs = adopted
-    ? adapter.adopt(workspace, dir)
-    : adapter.spawn(workspace, dir);
+  // spawn or adopt child processes per adapter. adapter.adopt MAY be
+  // async and MAY return null when no adoption target is available —
+  // fall back to spawn in that case.
+  let adoptedSpecs = null;
+  if (typeof adapter.adopt === 'function') {
+    try { adoptedSpecs = await adapter.adopt(workspace, dir); }
+    catch (e) { log(`adopt probe errored — falling back to spawn: ${e.message}`); }
+  }
+  const adopted = Boolean(adoptedSpecs);
+  const childSpecs = adoptedSpecs || adapter.spawn(workspace, dir);
   if (!Array.isArray(childSpecs) || childSpecs.length === 0) {
     throw new Error(`adapter ${adapter.name}: spawn() returned no children`);
   }

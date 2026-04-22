@@ -5,7 +5,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLAUDE="$HOME/.claude"
+# CLAUDE defaults to ~/.claude; override for dry-runs (CLAUDE=/tmp/foo uninstall.sh).
+CLAUDE="${CLAUDE:-$HOME/.claude}"
 
 BIN_FILES=(
   # LSP wrappers
