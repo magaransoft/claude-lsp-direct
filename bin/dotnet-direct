@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# dotnet-direct — per-workspace dotnet coordinator. Each /call runs
+# dotnet <command> as a subprocess; dotnet's own MSBuild build-server
+# handles warm persistence across calls automatically.
+# subcommands: start [workspace] | call <method> <json-params> [workspace] | stop [workspace] | status | tools [workspace]
+set -euo pipefail
+
+STATE_ROOT="${DOTNET_DIRECT_STATE:-$HOME/.cache/dotnet-direct}"
+COORDINATOR="$HOME/.claude/bin/dotnet-direct-coordinator.js"
+WORKSPACE_MARKERS=(global.json)
+# fallback markers checked via extension glob below
+FALLBACK_PATTERNS=('*.sln' '*.slnx' '*.csproj' '*.fsproj' '*.vbproj')
+
+die() { echo "dotnet-direct: $*" >&2; exit 1; }
+
+resolve_workspace() {
+  local ws="${1:-}"
+  if [ -n "$ws" ]; then ws="$(cd "$ws" && pwd)"; echo "$ws"; return; fi
+  ws="$PWD"
+  while [ "$ws" != "/" ]; do
+    for marker in "${WORKSPACE_MARKERS[@]}"; do
+      [ -e "$ws/$marker" ] && { echo "$ws"; return; }
+    done
+    for pat in "${FALLBACK_PATTERNS[@]}"; do
+      # glob match; set -f disabled locally
+      local matches=( "$ws"/$pat )
+      [ -e "${matches[0]}" ] && { echo "$ws"; return; }
+    done
+    ws="$(dirname "$ws")"
+  done
+  echo "$PWD"
+}
+
+state_dir() {
+  local hash
+  hash="$(printf '%s' "$1" | shasum | awk '{print $1}' | cut -c1-12)"
+  echo "$STATE_ROOT/$hash"
+}
+
+free_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
+state_get() { [ -f "$1/$2" ] && cat "$1/$2" || echo ""; }
+
+port_ready() {
+  curl -fsS -m 2 "http://127.0.0.1:$1/health" >/dev/null 2>&1
+}
+
+server_alive() {
+  local port; port="$(state_get "$1" port)"
+  [ -z "$port" ] && return 1
+  port_ready "$port"
+}
+
+cmd_start() {
+  command -v dotnet >/dev/null || die "dotnet not on PATH — install the .NET SDK from https://dotnet.microsoft.com"
+  [ -f "$COORDINATOR" ] || die "coordinator missing: $COORDINATOR"
+  local ws dir port pid
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  mkdir -p "$dir"
+  if server_alive "$dir"; then
+    echo "already running: workspace=$ws port=$(state_get "$dir" port) pid=$(state_get "$dir" pid)"
+    return 0
+  fi
+  port="$(free_port)"
+  echo "$ws" > "$dir/workspace"
+  echo "$port" > "$dir/port"
+  nohup node "$COORDINATOR" --tool-name dotnet-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
+  pid=$!
+  echo "$pid" > "$dir/pid"
+  local i=0
+  until port_ready "$port"; do
+    sleep 1
+    i=$((i+1))
+    [ "$i" -ge 30 ] && { kill "$pid" 2>/dev/null; die "coordinator did not bind port $port within 30s — check $dir/log"; }
+  done
+  echo "started: workspace=$ws port=$port pid=$pid state=$dir"
+}
+
+cmd_call() {
+  local method="${1:-}"; shift || true
+  local params_json="${1-}"; shift || true
+  [ -z "$params_json" ] && params_json='{}'
+  [ -z "$method" ] && die "usage: dotnet-direct call <method> '<json-params>' [workspace]"
+  local ws dir port
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  local payload
+  payload="$(jq -cn --arg method "$method" --argjson params "$params_json" '{method:$method,params:$params}')"
+  curl -fsS -m 600 "http://localhost:$port/call" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "dotnet call failed"
+  echo
+}
+
+cmd_tools() {
+  cat <<EOF
+dotnet-direct methods (per-call subprocess; MSBuild build-server warms persists across calls automatically):
+
+  version                 dotnet --version
+                          params: {}
+  info                    dotnet --info
+                          params: {}
+  build                   dotnet build [project] [flags]
+                          params: {project?, configuration?, framework?, verbosity?, noRestore?, extraArgs?[]}
+  test                    dotnet test  [project] [flags]
+                          params: {project?, configuration?, framework?, verbosity?, filter?, noBuild?, extraArgs?[]}
+  restore                 dotnet restore
+                          params: {project?, verbosity?, extraArgs?[]}
+  publish                 dotnet publish
+                          params: {project?, configuration?, framework?, verbosity?, extraArgs?[]}
+  run                     dotnet run
+                          params: {project?, configuration?, framework?, extraArgs?[]}
+  pack                    dotnet pack
+                          params: {project?, configuration?, verbosity?, extraArgs?[]}
+  build-server-shutdown   dotnet build-server shutdown
+                          params: {}
+  command                 dotnet <args...>   (escape hatch)
+                          params: {args: ["arg1", "arg2", ...]}
+
+invoke:
+  dotnet-direct call build   '{"configuration":"Release"}' [workspace]
+  dotnet-direct call test    '{"filter":"Category=Unit"}' [workspace]
+  dotnet-direct call restore '{}'                        [workspace]
+  dotnet-direct call command '{"args":["tool","list"]}' [workspace]
+
+timing: cold-start per call 5-10s; warm (build-server hot) sub-second for no-op builds.
+EOF
+}
+
+cmd_stop() {
+  local ws dir pid
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  pid="$(state_get "$dir" pid)"
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null && echo "stopped: pid=$pid workspace=$ws" || echo "kill failed (pid=$pid) — state cleared for $ws"
+  else
+    echo "no pid for $ws"
+  fi
+  rm -f "$dir/pid" "$dir/port"
+}
+
+cmd_status() {
+  [ -d "$STATE_ROOT" ] || { echo "no servers tracked"; return; }
+  local any=0
+  for dir in "$STATE_ROOT"/*/; do
+    [ -d "$dir" ] || continue
+    any=1
+    local ws pid port alive
+    ws="$(state_get "$dir" workspace)"
+    pid="$(state_get "$dir" pid)"
+    port="$(state_get "$dir" port)"
+    alive="dead"
+    [ -n "$port" ] && port_ready "$port" && alive="alive"
+    printf 'workspace=%s  port=%s  pid=%s  %s\n' "$ws" "$port" "$pid" "$alive"
+  done
+  [ "$any" = 0 ] && echo "no servers tracked"
+}
+
+case "${1:-}" in
+  start)  shift; cmd_start "$@" ;;
+  call)   shift; cmd_call "$@" ;;
+  tools)  shift; cmd_tools "$@" ;;
+  stop)   shift; cmd_stop "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  ""|-h|--help)
+    cat <<EOF
+dotnet-direct — per-workspace dotnet coordinator
+
+usage:
+  dotnet-direct start [workspace]
+  dotnet-direct call <method> '<json-params>' [workspace]
+  dotnet-direct tools
+  dotnet-direct stop [workspace]
+  dotnet-direct status
+
+workspace markers: global.json > *.sln > *.slnx > *.csproj > *.fsproj > *.vbproj
+
+state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log,calls.log,triggers.json}
+EOF
+    ;;
+  *) die "unknown subcommand: $1 (try --help)" ;;
+esac

@@ -14,11 +14,27 @@ Each supported language has a bash wrapper in `bin/` that proxies its LSP over p
 | csharp | `cs-direct` | csharp-ls | `.slnx` > `.sln` > `.csproj` |
 | java | `java-direct` | jdtls (Eclipse JDT.LS) | `pom.xml` > `build.gradle.kts` > `build.gradle` > `settings.gradle.kts` > `settings.gradle` > `.project` |
 
+### Opt-in wrappers (non-LSP)
+
+Same CLI contract, different `call` method surface (named methods, not LSP methods).
+
+| tool | wrapper | backend | workspace markers |
+|---|---|---|---|
+| sbt | `sbt-direct` | `sbt` CLI (one-shot) + `sbt --client` (persistent-JVM, see adapter) | `build.sbt` > `build.sc` > `build.mill` > `project/build.properties` |
+| dotnet | `dotnet-direct` | `dotnet` CLI (per-call; MSBuild build-server handles warm persistence) | `global.json` > `*.sln` > `*.slnx` > `*.csproj` > `*.fsproj` > `*.vbproj` |
+| prettier | `prettier-direct` | in-process `require('prettier')` | `.prettierrc*` > `prettier.config.*` > `package.json` |
+| eslint | `eslint-direct` | in-process `require('eslint')` | `eslint.config.*` > `.eslintrc*` > `package.json` |
+| scalafmt | `scalafmt-direct` | `scalafmt` native/JVM CLI | `.scalafmt.conf` > `build.sbt` > `build.sc` > `build.mill` |
+
 ## Invariants
 
 ### Location
 - `bin/<name>-direct` — bash wrapper, user-scope, project-agnostic
-- `bin/lsp-stdio-proxy.js` — shared Node coordinator for standalone stdio LSPs (python, typescript, csharp); hybrid servers (Vue LS v3) use their own dedicated coordinator
+- `bin/tool-harness.js` — shared primitives (resolveWorkspace, stateDir, serveHttp, invalidationLoop, callLog, framing)
+- `bin/tool-server-proxy.js` — external-process coordinator (LSPs, sbt, dotnet, scalafmt)
+- `bin/node-formatter-daemon.js` — in-process Node-library coordinator (prettier, eslint)
+- `bin/adapters/<tool>.js` — per-tool behavior (spawn children, init, onChildMessage, call, triggers)
+- `bin/lsp-stdio-proxy.js`, `bin/vue-direct-coordinator.js` — back-compat shim entrypoints composing harness + proxy + adapter
 
 ### CLI surface
 All wrappers expose the same subcommands:

@@ -61,7 +61,7 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$PROXY" --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${LSP_ARGS[@]}" >"$dir/log" 2>&1 &
+  nohup node "$PROXY" --tool-name py-direct --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${LSP_ARGS[@]}" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   local i=0

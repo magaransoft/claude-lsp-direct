@@ -1,5 +1,21 @@
 # Contributing
 
+## Architecture overview
+
+The coordinator is split into three modules sharing one harness:
+
+- `bin/tool-harness.js` — six primitives: `resolveWorkspace`,
+  `stateDir`, `serveHttp`, `invalidationLoop`, `callLog`, plus
+  framing readers/writers (contentLength, jsonLine, tsserverMixed).
+- `bin/tool-server-proxy.js` — coordinator for tools with an external
+  child process (LSPs, build tools). Adapters declare `children[]`
+  + `init` + `onChildMessage` + `call` + `triggers`.
+- `bin/node-formatter-daemon.js` — coordinator for in-process Node
+  libraries (prettier, eslint). Adapters declare `preload(workspace)`
+  → pkg + `call(req, {pkg, state})`.
+
+See `docs/architecture.md` for the full adapter contract.
+
 ## Adding a new language
 
 Minimal steps for a standard stdio LSP (server speaks LSP over `--stdio`, no hybrid coordination):
@@ -53,11 +69,46 @@ Add the new language to the primary-path table.
 
 ## Hybrid servers (require paired processes)
 
-If the target LSP requires a paired companion process (like Vue LS v3 + tsserver + `@vue/typescript-plugin`), the generic `lsp-stdio-proxy.js` isn't enough. Write a dedicated coordinator modeled on `bin/vue-direct-coordinator.js`:
-- Spawn both children
-- Bridge any custom cross-server notifications
-- Expose the same HTTP surface (`POST /lsp`, `GET /health`)
-- Wire the bash wrapper to point at your new coordinator instead of `lsp-stdio-proxy.js`
+If the target LSP requires a paired companion process (like Vue LS v3 + tsserver + `@vue/typescript-plugin`), the generic `lsp-stdio-proxy.js` isn't enough. Write a dedicated adapter in `bin/adapters/<name>.js` declaring two child specs:
+
+```js
+spawn(workspace) {
+  return [
+    { id: 'main', frame: 'contentLength', cmd: 'main-ls', args: ['--stdio'] },
+    { id: 'helper', frame: 'tsserverMixed', cmd: 'node', args: [...] },
+  ];
+}
+```
+
+Adapter `onChildMessage(childId, msg, ctx)` handles cross-child routing;
+`ctx.state` stores bridge tables. See `bin/adapters/vue-hybrid.js` for
+the Vue LS v3 + tsserver bridging pattern.
+
+Compose into `bin/<name>-direct-coordinator.js` (3-line shim):
+
+```js
+const { createProxy } = require('./tool-server-proxy.js');
+const { createAdapter } = require('./adapters/<name>.js');
+createProxy({ adapter: createAdapter(), workspace, port, toolName });
+```
+
+## Non-LSP tools (build tools, formatters)
+
+The same harness accepts non-LSP tools. Two patterns:
+
+### External-subprocess adapter (JVM CLIs, compilers)
+Use `tool-server-proxy.js`. Adapter spawns a keepalive child (e.g.
+`node -e 'setInterval(...)'`) so the harness's child-exit +
+health-probe wiring works; each `call` runs the target CLI via
+`child_process.spawn` and returns the `{exit, signal, stdout,
+stderr}` quad. See `bin/adapters/sbt-oneshot.js`, `dotnet-cli.js`,
+`scalafmt-cli.js`.
+
+### In-process Node library adapter (prettier, eslint)
+Use `node-formatter-daemon.js`. Adapter implements `preload(workspace)`
+→ pkg + `call(req, {pkg, state})`. Prefer workspace-local resolution
+via `require.resolve(pkg, {paths: [workspace]})`, fall back to global.
+See `bin/adapters/prettier.js`, `bin/adapters/eslint.js`.
 
 ## Invariants
 

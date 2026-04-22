@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# java-direct — proxy jdtls (Eclipse JDT.LS) over persistent HTTP; per-workspace isolation; LSP-workaround convention per rules/lsp.md
+# scalafmt-direct — per-workspace scalafmt coordinator. Each /call
+# runs scalafmt as a one-shot subprocess (no persistent JVM in v1 —
+# scalafmt-dynamic API adapter is future work).
 # subcommands: start [workspace] | call <method> <json-params> [workspace] | stop [workspace] | status | tools [workspace]
 set -euo pipefail
 
-STATE_ROOT="${JAVA_DIRECT_STATE:-$HOME/.cache/java-direct}"
-PROXY="$HOME/.claude/bin/lsp-stdio-proxy.js"
-LSP_BIN="jdtls"
-LANG_ID="java"
-WORKSPACE_MARKERS=(pom.xml build.gradle.kts build.gradle settings.gradle.kts settings.gradle .project)
+STATE_ROOT="${SCALAFMT_DIRECT_STATE:-$HOME/.cache/scalafmt-direct}"
+COORDINATOR="$HOME/.claude/bin/scalafmt-direct-coordinator.js"
+WORKSPACE_MARKERS=(.scalafmt.conf build.sbt build.sc build.mill)
 
-die() { echo "java-direct: $*" >&2; exit 1; }
+die() { echo "scalafmt-direct: $*" >&2; exit 1; }
 
 resolve_workspace() {
   local ws="${1:-}"
@@ -47,8 +47,8 @@ server_alive() {
 }
 
 cmd_start() {
-  command -v "$LSP_BIN" >/dev/null || die "$LSP_BIN not on PATH — install jdtls (brew install jdtls; requires JDK 17+)"
-  [ -f "$PROXY" ] || die "proxy missing: $PROXY"
+  command -v scalafmt >/dev/null || die "sbt not on PATH — install via brew or coursier (cs install scalafmt)"
+  [ -f "$COORDINATOR" ] || die "coordinator missing: $COORDINATOR"
   local ws dir port pid
   ws="$(resolve_workspace "${1:-}")"
   dir="$(state_dir "$ws")"
@@ -60,16 +60,14 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  # jdtls needs a per-workspace -data dir (Eclipse workspace metadata); scope under our state hash for clean stop
-  local lsp_args=(-data "$dir/jdt-data")
-  nohup node "$PROXY" --tool-name java-direct --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${lsp_args[@]}" >"$dir/log" 2>&1 &
+  nohup node "$COORDINATOR" --tool-name scalafmt-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   local i=0
   until port_ready "$port"; do
     sleep 1
     i=$((i+1))
-    [ "$i" -ge 180 ] && { kill "$pid" 2>/dev/null; die "proxy did not bind port $port within 180s — check $dir/log"; }
+    [ "$i" -ge 30 ] && { kill "$pid" 2>/dev/null; die "coordinator did not bind port $port within 30s — check $dir/log"; }
   done
   echo "started: workspace=$ws port=$port pid=$pid state=$dir"
 }
@@ -78,7 +76,7 @@ cmd_call() {
   local method="${1:-}"; shift || true
   local params_json="${1-}"; shift || true
   [ -z "$params_json" ] && params_json='{}'
-  [ -z "$method" ] && die "usage: java-direct call <method> '<json-params>' [workspace]"
+  [ -z "$method" ] && die "usage: scalafmt-direct call <method> '<json-params>' [workspace]"
   local ws dir port
   ws="$(resolve_workspace "${1:-}")"
   dir="$(state_dir "$ws")"
@@ -86,36 +84,37 @@ cmd_call() {
   port="$(state_get "$dir" port)"
   local payload
   payload="$(jq -cn --arg method "$method" --argjson params "$params_json" '{method:$method,params:$params}')"
-  curl -fsS -m 120 "http://localhost:$port/lsp" -X POST \
+  curl -fsS -m 600 "http://localhost:$port/call" -X POST \
     -H 'Content-Type: application/json' \
-    -d "$payload" || die "lsp call failed"
+    -d "$payload" || die "scalafmt call failed"
   echo
 }
 
 cmd_tools() {
   cat <<EOF
-java-direct exposes raw LSP methods (jdtls / Eclipse JDT.LS surface).
-invoke: java-direct call <method> '<json-params>' [workspace]
+scalafmt-direct methods (one-shot mode — each call runs scalafmt as a subprocess):
 
-common methods:
-  textDocument/documentSymbol       outline of a .java file
-  textDocument/hover                type + javadoc at position
-  textDocument/definition           jump to definition
-  textDocument/references           find references
-  textDocument/typeDefinition       jump to type
-  textDocument/implementation       find implementations
-  textDocument/completion           completions at position
-  textDocument/signatureHelp        call signature
-  textDocument/prepareCallHierarchy get call-hierarchy handle
-  callHierarchy/incomingCalls       callers
-  callHierarchy/outgoingCalls       callees
-  workspace/symbol                  fuzzy search across workspace
+  version        scalafmt --version
+                 params: {}
 
-params MUST include textDocument.uri as file://<abs-path> for textDocument/* methods.
-note: jdtls runs a background "Building workspace" job after start — workspace/symbol may return empty until it completes (typically 5-15s on small projects, longer on Maven/Gradle imports).
+  format-stdin   scalafmt --stdin [--stdin-filename <path>]
+                 params: { source: "<scala-code>", filepath?: "<path>" }
+                 returns: {exit, signal, stdout, stderr} — stdout is formatted source
 
-example:
-  java-direct call textDocument/documentSymbol '{"textDocument":{"uri":"file:///path/to/Hello.java"}}'
+  format-files   scalafmt --non-interactive <files...>  (rewrites in place)
+                 params: { files: ["/abs/path/A.scala", "/abs/path/B.scala"] }
+
+  check-files    scalafmt --test --non-interactive <files...>
+                 params: { files: ["/abs/path/A.scala"] }
+
+invoke:
+  scalafmt-direct call version      '{}' [workspace]
+  scalafmt-direct call format-stdin '{"source":"object A{}","filepath":"A.scala"}'
+  scalafmt-direct call check-files  '{"files":["src/main/scala/A.scala"]}'
+
+cold-start per call is 3-5s (scalafmt JVM boot + classloader). A
+persistent-JVM adapter (scalafmt-dynamic API in a long-running JVM) is
+future work.
 EOF
 }
 
@@ -157,23 +156,20 @@ case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   ""|-h|--help)
     cat <<EOF
-java-direct — proxy jdtls (Eclipse JDT.LS) over persistent HTTP; one server per workspace
+scalafmt-direct — per-workspace scalafmt coordinator
 
 usage:
-  java-direct start [workspace]                 spawn proxy for workspace (default: cwd walking up for pom.xml/build.gradle/settings.gradle/.project)
-  java-direct call <method> '<json-params>' [ws]  issue raw LSP method — auto-starts server
-  java-direct tools                             list LSP method surface
-  java-direct stop [workspace]                  kill server for workspace
-  java-direct status                            show all tracked servers
+  scalafmt-direct start [workspace]
+  scalafmt-direct call <method> '<json-params>' [workspace]
+  scalafmt-direct tools
+  scalafmt-direct stop [workspace]
+  scalafmt-direct status
 
 workspace markers (walk-up order): ${WORKSPACE_MARKERS[*]}
 
-state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log}
-jdt-data (Eclipse workspace metadata): $STATE_ROOT/<workspace-hash>/jdt-data/
+state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log,calls.log,triggers.json}
 
-prereqs:
-  brew install jdtls    # ships launcher script + Eclipse JDT.LS
-  java >= 17            # JDK, not just JRE
+see: docs/per-language/scalafmt.md for caveats (per-call cold-start; scalafmt-dynamic in-JVM adapter is follow-up).
 EOF
     ;;
   *) die "unknown subcommand: $1 (try --help)" ;;

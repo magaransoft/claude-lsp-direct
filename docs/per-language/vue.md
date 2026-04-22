@@ -2,6 +2,19 @@
 
 Proxies Vue Language Server v3 + a paired tsserver hosting `@vue/typescript-plugin` over HTTP. Uses a dedicated hybrid coordinator (`vue-direct-coordinator.js`) rather than the generic `lsp-stdio-proxy.js`, because Vue LS v3 is hybrid-mandatory.
 
+## Op-surface note
+
+`textDocument/documentSymbol` is the canonical probe and is baselined
+by `scripts/verify.sh`. Semantic queries that depend on the virtual-
+file bridge (`textDocument/hover`, `textDocument/definition`,
+`textDocument/references`) may return `null` / `[]` depending on how
+long tsserver + `@vue/typescript-plugin` take to fully materialize the
+.vue's virtual .ts module. This behavior is identical pre- and post-
+refactor (verified by diffing against the `pre-refactor` tag on a real
+Vue 3 / Quasar project — both returned null for the same hover
+position). When affected, waiting 5-10s after the first `didOpen`
+before issuing hover/definition usually resolves it.
+
 ## Install prereq
 ```bash
 npm i -g @vue/language-server@3.2.6 \

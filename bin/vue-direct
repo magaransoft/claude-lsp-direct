@@ -70,7 +70,7 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$COORDINATOR" --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
+  nohup node "$COORDINATOR" --tool-name vue-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   local i=0

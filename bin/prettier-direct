@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-# ts-direct — proxy typescript-language-server over persistent HTTP; per-workspace isolation; LSP-workaround convention per rules/lsp.md
+# prettier-direct — per-workspace prettier daemon. In-process Node
+# library (no child process); preload cost ~100ms, warm calls <50ms.
 # subcommands: start [workspace] | call <method> <json-params> [workspace] | stop [workspace] | status | tools [workspace]
 set -euo pipefail
 
-STATE_ROOT="${TS_DIRECT_STATE:-$HOME/.cache/ts-direct}"
-PROXY="$HOME/.claude/bin/lsp-stdio-proxy.js"
-LSP_BIN="typescript-language-server"
-LSP_ARGS=(--stdio)
-LANG_ID="typescript"
-WORKSPACE_MARKERS=(tsconfig.json package.json)
+STATE_ROOT="${PRETTIER_DIRECT_STATE:-$HOME/.cache/prettier-direct}"
+DAEMON="$HOME/.claude/bin/prettier-direct-daemon.js"
+WORKSPACE_MARKERS=(.prettierrc .prettierrc.json .prettierrc.js .prettierrc.cjs .prettierrc.mjs prettier.config.js prettier.config.cjs prettier.config.mjs package.json)
 
-die() { echo "ts-direct: $*" >&2; exit 1; }
+die() { echo "prettier-direct: $*" >&2; exit 1; }
 
 resolve_workspace() {
   local ws="${1:-}"
@@ -48,8 +46,9 @@ server_alive() {
 }
 
 cmd_start() {
-  command -v "$LSP_BIN" >/dev/null || die "$LSP_BIN not on PATH — install typescript-language-server (npm i -g typescript-language-server typescript) or ensure claude plugin binary is resolvable"
-  [ -f "$PROXY" ] || die "proxy missing: $PROXY"
+  # verify prettier is resolvable from somewhere (workspace node_modules
+  # or global); daemon's preload() does the actual require.
+  [ -f "$DAEMON" ] || die "daemon missing: $DAEMON"
   local ws dir port pid
   ws="$(resolve_workspace "${1:-}")"
   dir="$(state_dir "$ws")"
@@ -61,14 +60,14 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$PROXY" --tool-name ts-direct --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${LSP_ARGS[@]}" >"$dir/log" 2>&1 &
+  nohup node "$DAEMON" --tool-name prettier-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   local i=0
   until port_ready "$port"; do
     sleep 1
     i=$((i+1))
-    [ "$i" -ge 30 ] && { kill "$pid" 2>/dev/null; die "proxy did not bind port $port within 30s — check $dir/log"; }
+    [ "$i" -ge 10 ] && { kill "$pid" 2>/dev/null; die "daemon did not bind port $port within 10s — check $dir/log"; }
   done
   echo "started: workspace=$ws port=$port pid=$pid state=$dir"
 }
@@ -77,43 +76,38 @@ cmd_call() {
   local method="${1:-}"; shift || true
   local params_json="${1-}"; shift || true
   [ -z "$params_json" ] && params_json='{}'
-  [ -z "$method" ] && die "usage: ts-direct call <method> '<json-params>' [workspace]"
+  [ -z "$method" ] && die "usage: prettier-direct call <method> '<json-params>' [workspace]"
   local ws dir port
   ws="$(resolve_workspace "${1:-}")"
   dir="$(state_dir "$ws")"
-  server_alive "$dir" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  server_alive "$dir" || { echo "daemon not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
   port="$(state_get "$dir" port)"
   local payload
   payload="$(jq -cn --arg method "$method" --argjson params "$params_json" '{method:$method,params:$params}')"
-  curl -fsS -m 120 "http://localhost:$port/lsp" -X POST \
+  curl -fsS -m 120 "http://localhost:$port/call" -X POST \
     -H 'Content-Type: application/json' \
-    -d "$payload" || die "lsp call failed"
+    -d "$payload" || die "prettier call failed"
   echo
 }
 
 cmd_tools() {
   cat <<EOF
-ts-direct exposes raw LSP methods (typescript-language-server surface).
-invoke: ts-direct call <method> '<json-params>' [workspace]
+prettier-direct methods (in-process prettier — warm calls <50ms):
 
-common methods:
-  textDocument/documentSymbol       outline of a .ts file
-  textDocument/hover                type + doc at position
-  textDocument/definition           jump to definition
-  textDocument/references           find references
-  textDocument/typeDefinition       jump to type
-  textDocument/implementation       find implementations
-  textDocument/completion           completions at position
-  textDocument/signatureHelp        call signature
-  textDocument/prepareCallHierarchy get call-hierarchy handle
-  callHierarchy/incomingCalls       callers
-  callHierarchy/outgoingCalls       callees
-  workspace/symbol                  fuzzy search across workspace
+  version        prettier.version
+                 params: {}
+  format         prettier.format(source, options)
+                 params: { source: "<code>", filepath?: "<path>", options?: {...} }
+  check          prettier.check(source, options)
+                 params: { source: "<code>", filepath?: "<path>", options?: {...} }
+  format-file    read file, prettier.resolveConfig, prettier.format; returns {changed, formatted}
+                 params: { filepath: "<abs-path>" }
+  resolve-config prettier.resolveConfig(filepath)
+                 params: { filepath: "<abs-path>" }
 
-params MUST include textDocument.uri as file://<abs-path> for textDocument/* methods.
-
-example:
-  ts-direct call textDocument/documentSymbol '{"textDocument":{"uri":"file:///path/to/file.ts"}}'
+invoke:
+  prettier-direct call format-file '{"filepath":"/abs/path/file.ts"}'
+  prettier-direct call format '{"source":"const x=1","filepath":"x.ts"}'
 EOF
 }
 
@@ -131,7 +125,7 @@ cmd_stop() {
 }
 
 cmd_status() {
-  [ -d "$STATE_ROOT" ] || { echo "no servers tracked"; return; }
+  [ -d "$STATE_ROOT" ] || { echo "no daemons tracked"; return; }
   local any=0
   for dir in "$STATE_ROOT"/*/; do
     [ -d "$dir" ] || continue
@@ -144,7 +138,7 @@ cmd_status() {
     [ -n "$port" ] && port_ready "$port" && alive="alive"
     printf 'workspace=%s  port=%s  pid=%s  %s\n' "$ws" "$port" "$pid" "$alive"
   done
-  [ "$any" = 0 ] && echo "no servers tracked"
+  [ "$any" = 0 ] && echo "no daemons tracked"
 }
 
 case "${1:-}" in
@@ -155,18 +149,17 @@ case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   ""|-h|--help)
     cat <<EOF
-ts-direct — proxy typescript-language-server over persistent HTTP; one server per workspace
+prettier-direct — per-workspace prettier daemon
 
 usage:
-  ts-direct start [workspace]                 spawn proxy for workspace (default: cwd walking up for tsconfig/package.json)
-  ts-direct call <method> '<json-params>' [ws]  issue raw LSP method — auto-starts server
-  ts-direct tools                             list LSP method surface
-  ts-direct stop [workspace]                  kill server for workspace
-  ts-direct status                            show all tracked servers
+  prettier-direct start [workspace]
+  prettier-direct call <method> '<json-params>' [workspace]
+  prettier-direct tools
+  prettier-direct stop [workspace]
+  prettier-direct status
 
-workspace markers (walk-up order): ${WORKSPACE_MARKERS[*]}
-
-state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log}
+state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log,calls.log,triggers.json}
+install: prefer workspace-local via pnpm/npm; global fallback via 'npm i -g prettier'.
 EOF
     ;;
   *) die "unknown subcommand: $1 (try --help)" ;;
