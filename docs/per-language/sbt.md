@@ -83,8 +83,11 @@ What works:
 
 - **non-sandboxed shell** (regular terminal) — sbt boots cleanly.
 - **Claude Bash with `dangerouslyDisableSandbox: true`** — verified
-  working: `sbt --version` returns `sbt version in this project:
-  1.11.6 / sbt runner version: 1.10.11`.
+  working against a real multi-module Play 3 / Scala 3 project:
+  `sbt-direct call version` reads the project's `build.sbt` correctly;
+  `sbt-direct call task {"task":"scalafmtCheckAll"}` runs the
+  sbt-scalafmt plugin end-to-end and surfaces per-file formatting
+  diffs.
 - **explicit sandbox allowlist** — add
   `/private/var/folders/**/.sbt/**` to
   `sandbox.filesystem.allowWrite` in `~/.claude/settings.json`;

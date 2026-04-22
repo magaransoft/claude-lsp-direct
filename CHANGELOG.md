@@ -44,12 +44,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - `dotnet-direct call version {}` returns `{exit: 0, stdout: "10.0.103\n"}`.
 - `prettier-direct call format-file {...}` returns `{formatted, changed}`; `eslint-direct call version {}` returns `{version: "10.2.1"}`.
 - `sbt-direct call version {}` returns `{exit: 0, stdout: "sbt version in this project: 1.11.6\nsbt runner version: 1.10.11\n"}` under Claude Bash with `dangerouslyDisableSandbox: true`; works out of any regular shell.
+- `sbt-direct call task {"task":"scalafmtCheckAll"}` against a real multi-module Play 3 project (~1.5k LOC Scala) returned `{exit: 1}` with the expected "scalafmt: N files must be formatted" output — proves end-to-end build-tool integration (exit 1 because files needed reformatting, not because sbt-direct failed).
 - `hooks/tests/run.sh` → 97/97 pass.
 - 19/19 harness + proxy smoke tests (`node --test bin/*.test.js`).
 
 ### Known caveats
-- sbt-direct boot fails inside sandboxed shells that override `$TMPDIR`: the JVM reads `java.io.tmpdir` from the OS per-user tmpdir and sbt's BootServerSocket can't write there. Workarounds documented in `docs/per-language/sbt.md § Sandbox limitation` — non-sandboxed shell or `dangerouslyDisableSandbox: true`.
-- scalafmt-direct shipped with architectural verification only; full real-world smoke pending a local scalafmt install.
+- sbt-direct boot fails inside sandboxed shells that override `$TMPDIR`: the JVM reads `java.io.tmpdir` from the OS per-user tmpdir and sbt's BootServerSocket can't write there. Documented + worked around in `docs/per-language/sbt.md § Sandbox limitation` (non-sandboxed shell, `dangerouslyDisableSandbox: true`, or whitelisting `/private/var/folders/**/.sbt/**`). Verified working against a real Play 3 / Scala 3 project via the bypass path.
+- scalafmt-direct shipped with architectural verification only (CLI install blocked under the current sandbox; native release binary 404'd during the attempted bootstrap). The engine itself was proved functional indirectly: `sbt scalafmtCheckAll` routed through sbt-direct successfully reported 12 unformatted files in the same project.
 
 ## [1.1.0] — 2026-04-21
 
