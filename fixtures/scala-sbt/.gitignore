@@ -5,3 +5,4 @@ project/project/
 .bloop/
 .metals/
 .scala-build/
+project/metals.sbt

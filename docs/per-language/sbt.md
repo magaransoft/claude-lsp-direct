@@ -1,29 +1,18 @@
 # sbt — `sbt-direct`
 
-Per-workspace sbt coordinator with two modes:
+Per-workspace sbt coordinator. Per-call subprocess mode: each `call`
+runs `sbt <task>` as a fresh subprocess. 20-40s per call (JVM boot +
+Ivy/Coursier resolution + task execution).
 
-| mode | activation | cold call | warm call | requires |
-|---|---|---|---|---|
-| `oneshot` (default) | `SBT_DIRECT_MODE=oneshot` or unset | 20-40s | 20-40s | sbt on PATH |
-| `thin-client` (experimental) | `SBT_DIRECT_MODE=thin-client` | 20-40s (first call boots server) | 200-500ms (`sbt --client`) | sbt on PATH + `install.sh` allowlist (or `dangerouslyDisableSandbox`) |
-
-> **thin-client mode is experimental.** `target/active.json` detection is
-> unreliable across sbt configurations — builds with certain plugin
-> combinations don't write the file under `-Dsbt.server.forcestart=true`,
-> and the coordinator's 90s init timeout may elapse with no server
-> available. If thin-client mode fails for your project, fall back to
-> oneshot (default) while the adoption protocol is hardened.
-
-The thin-client adapter keeps a persistent sbt server alive per
-workspace. On start, the coordinator spawns `sbt` with
-`-Dsbt.server.forcestart=true` and waits for
-`<workspace>/target/active.json` to appear (up to 90s on fresh
-checkouts). Each `call` thereafter invokes `sbt --client "<cmd>"`
-which reuses that server via the ipcsocket. Adoption: if
-`target/active.json` already exists and its socket responds to a
-5-second probe, the coordinator attaches to the existing server
-instead of spawning a new one — lets `sbt shell` in a terminal
-share state with `sbt-direct` calls.
+A persistent-JVM path via sbt's thin client (`sbt --client`) was
+attempted and withdrawn — under Claude Bash (and in isolated
+reproductions on a real Play 3 project) sbt boots cleanly but
+`target/active.json` is never written, even with
+`-Dsbt.server.forcestart=true` and a `shell` subcommand. Root cause
+unconfirmed; candidates include sbt's tty detection, sandbox-
+suppressed file creation under the JVM's `java.io.tmpdir`, or
+plugin-specific interference. Until the adoption protocol is
+reproducible, per-call subprocess is the only sbt path.
 
 ## Install prereq
 

@@ -28,18 +28,10 @@ function createAdapter({
     markers,
     triggers,
 
-    // one-shot adapter: we do NOT spawn a persistent backing process.
-    // The proxy still runs as a coordinator so the wrapper's
-    // server_alive probe keeps working; we use a dummy `sleep infinity`
-    // child so the harness's child-exit plumbing is satisfied.
-    spawn() {
-      return [{
-        id: 'keepalive',
-        frame: 'jsonLine',
-        cmd: process.execPath,
-        args: ['-e', 'setInterval(() => {}, 1 << 30)'],
-      }];
-    },
+    // one-shot adapter: no persistent backing process. Harness accepts
+    // empty children since v1.2.1; the coordinator's HTTP surface +
+    // invalidationLoop + callLog all work without a child.
+    spawn() { return []; },
 
     async init(ctx) {
       ctx.log(`sbt adapter ready (per-call mode) — sbtCmd=${sbtCmd}`);

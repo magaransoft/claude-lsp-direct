@@ -8,12 +8,6 @@ set -euo pipefail
 STATE_ROOT="${SBT_DIRECT_STATE:-$HOME/.cache/sbt-direct}"
 COORDINATOR="$HOME/.claude/bin/sbt-direct-coordinator.js"
 WORKSPACE_MARKERS=(build.sbt build.sc build.mill project/build.properties)
-# SBT_DIRECT_MODE=oneshot (default) | thin-client
-#   oneshot: each /call spawns fresh `sbt <task>` subprocess (cold per call).
-#   thin-client: coordinator starts persistent sbt server; /call uses
-#     `sbt --client <cmd>` for ~200-500ms warm calls. Requires install.sh
-#     allowlist for the sbt ipcsocket path (or dangerouslyDisableSandbox).
-SBT_MODE="${SBT_DIRECT_MODE:-oneshot}"
 
 die() { echo "sbt-direct: $*" >&2; exit 1; }
 
@@ -66,18 +60,14 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$COORDINATOR" --tool-name sbt-direct --mode "$SBT_MODE" --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
+  nohup node "$COORDINATOR" --tool-name sbt-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
-  # thin-client waits for sbt server to create target/active.json (20-40s
-  # warm, up to 90s on fresh checkout). oneshot binds immediately.
-  local timeout=30
-  [ "$SBT_MODE" = "thin-client" ] && timeout=120
   local i=0
   until port_ready "$port"; do
     sleep 1
     i=$((i+1))
-    [ "$i" -ge "$timeout" ] && { kill "$pid" 2>/dev/null; die "coordinator did not bind port $port within ${timeout}s — check $dir/log"; }
+    [ "$i" -ge 30 ] && { kill "$pid" 2>/dev/null; die "coordinator did not bind port $port within 30s — check $dir/log"; }
   done
   echo "started: workspace=$ws port=$port pid=$pid state=$dir"
 }
@@ -102,38 +92,31 @@ cmd_call() {
 
 cmd_tools() {
   cat <<EOF
-sbt-direct methods (current mode: $SBT_MODE):
+sbt-direct methods (per-call subprocess mode):
 
-  version    sbt --version / sbt --client about
+  version    sbt --version
              params: {}
 
   reload     sbt reload (re-read build.sbt)
              params: {}
 
   task       run an arbitrary sbt task
-             params: { task: "<name>", project?: "<module>", timeoutMs?: N }
+             params: { task: "<name>", project?: "<module>" }
              examples:
                {"task":"compile"}
                {"task":"test","project":"core"}
                {"task":"assembly"}
                {"task":"publishLocal"}
 
-  shutdown   (thin-client only) terminate the persistent sbt server
-             params: {}
-
 invoke:
   sbt-direct call task '{"task":"compile"}' [workspace]
   sbt-direct call reload '{}' [workspace]
   sbt-direct call version '{}' [workspace]
 
-modes:
-  SBT_DIRECT_MODE=oneshot     (default) cold per call; ~20-40s each
-  SBT_DIRECT_MODE=thin-client server persists per workspace; cold
-                              first call ~20-40s, warm calls
-                              ~200-500ms via sbt --client. Requires
-                              install.sh allowlist for ipcsocket dir.
+each call runs sbt as a fresh subprocess — cold-start per call is
+substantial (20-40s for build import).
 
-see docs/per-language/sbt.md for the full tradeoff.
+see docs/per-language/sbt.md for timing + invalidation matrix.
 EOF
 }
 

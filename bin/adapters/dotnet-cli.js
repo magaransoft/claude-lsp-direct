@@ -22,14 +22,8 @@ function createAdapter({
     markers,
     triggers,
 
-    spawn() {
-      return [{
-        id: 'keepalive',
-        frame: 'jsonLine',
-        cmd: process.execPath,
-        args: ['-e', 'setInterval(() => {}, 1 << 30)'],
-      }];
-    },
+    // per-call subprocess adapter — no persistent child needed.
+    spawn() { return []; },
 
     async init(ctx) {
       ctx.log(`dotnet adapter ready — dotnetCmd=${dotnetCmd}`);

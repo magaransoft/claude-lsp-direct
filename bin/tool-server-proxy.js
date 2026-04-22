@@ -38,10 +38,14 @@ async function createProxy({ adapter, workspace, port, toolName }) {
     catch (e) { log(`adopt probe errored — falling back to spawn: ${e.message}`); }
   }
   const adopted = Boolean(adoptedSpecs);
-  const childSpecs = adoptedSpecs || adapter.spawn(workspace, dir);
-  if (!Array.isArray(childSpecs) || childSpecs.length === 0) {
-    throw new Error(`adapter ${adapter.name}: spawn() returned no children`);
+  const childSpecs = adoptedSpecs || adapter.spawn(workspace, dir) || [];
+  if (!Array.isArray(childSpecs)) {
+    throw new Error(`adapter ${adapter.name}: spawn() did not return an array`);
   }
+  // Empty children is legal for adapters that drive their backing tool
+  // entirely via per-call subprocess spawn (sbt-oneshot, dotnet-cli,
+  // scalafmt-cli). The coordinator's HTTP surface + invalidationLoop +
+  // callLog still function; onChildMessage is never invoked.
 
   const children = {};
   for (const spec of childSpecs) {
