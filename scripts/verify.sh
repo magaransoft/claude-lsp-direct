@@ -17,21 +17,13 @@ FIXTURES="$REPO/fixtures"
 BASELINES="$FIXTURES/baselines"
 
 MODE="human"
-IMPL=""
 for arg in "$@"; do
   case "$arg" in
     --json) MODE="json" ;;
     --diff-baselines) MODE="diff" ;;
-    --impl=v1) IMPL="v1" ;;
-    --impl=v2) IMPL="v2" ;;
     *) echo "verify.sh: unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
-# export LSP_PROXY_IMPL so the wrappers route through the chosen coordinator.
-# Unset when --impl not passed so baseline capture under default semantics.
-if [ -n "$IMPL" ]; then
-  export LSP_PROXY_IMPL="$IMPL"
-fi
 
 # helpers
 

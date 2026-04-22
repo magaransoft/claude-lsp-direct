@@ -4,9 +4,7 @@
 set -euo pipefail
 
 STATE_ROOT="${JAVA_DIRECT_STATE:-$HOME/.cache/java-direct}"
-PROXY_V1="$HOME/.claude/bin/lsp-stdio-proxy.js"
-PROXY_V2="$HOME/.claude/bin/lsp-stdio-proxy.v2.js"
-PROXY="$([ "${LSP_PROXY_IMPL:-v2}" = "v1" ] && echo "$PROXY_V1" || echo "$PROXY_V2")"
+PROXY="$HOME/.claude/bin/lsp-stdio-proxy.js"
 LSP_BIN="jdtls"
 LANG_ID="java"
 WORKSPACE_MARKERS=(pom.xml build.gradle.kts build.gradle settings.gradle.kts settings.gradle .project)
