@@ -8,7 +8,24 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLAUDE="$HOME/.claude"
 
-BIN_FILES=(metals-direct vue-direct vue-direct-coordinator.js py-direct ts-direct cs-direct java-direct lsp-stdio-proxy.js)
+# bin files (wrappers + coordinators + shared harness modules)
+BIN_FILES=(
+  # LSP wrappers
+  metals-direct vue-direct py-direct ts-direct cs-direct java-direct
+  # LSP coordinators (shim entrypoints)
+  vue-direct-coordinator.js lsp-stdio-proxy.js
+  # Opt-in build-tool wrappers + coordinators
+  sbt-direct sbt-direct-coordinator.js
+  dotnet-direct dotnet-direct-coordinator.js
+  scalafmt-direct scalafmt-direct-coordinator.js
+  # Opt-in formatter daemons
+  prettier-direct prettier-direct-daemon.js
+  eslint-direct eslint-direct-daemon.js
+  # Shared harness + coordinator modules
+  tool-harness.js tool-server-proxy.js node-formatter-daemon.js
+)
+# adapters dir symlinked as a whole (one entry per adapter would balloon; the dir is stable)
+BIN_DIRS=(adapters)
 HOOK_FILES=(enforce-lsp-over-grep.py enforce-lsp-workspace-root.py)
 TEST_FILES=(test_enforce_lsp_over_grep.py test_enforce_lsp_workspace_root.py)
 
@@ -47,6 +64,23 @@ for f in "${BIN_FILES[@]}"; do
   fi
   ln -s "$src" "$dst"
   log "  linked $f"
+done
+
+# ---- symlink bin/ directories (adapters/) ----
+for d in "${BIN_DIRS[@]}"; do
+  src="$REPO/bin/$d"
+  dst="$CLAUDE/bin/$d"
+  [ -d "$src" ] || die "missing repo dir: $src"
+  if [ -L "$dst" ]; then
+    current="$(readlink "$dst")"
+    [ "$current" = "$src" ] && { log "  $d/ already linked"; continue; }
+    rm "$dst"
+  elif [ -e "$dst" ]; then
+    mv "$dst" "$dst.bak-$(date +%s)"
+    log "  backed up existing $d → $dst.bak-<ts>"
+  fi
+  ln -s "$src" "$dst"
+  log "  linked $d/"
 done
 
 # ---- symlink hooks/ (optional, only if user has hook-based LSP enforcement) ----
@@ -95,7 +129,12 @@ if [ -f "$SETTINGS" ]; then
       "Bash(~/.claude/bin/py-direct *)",
       "Bash(~/.claude/bin/ts-direct *)",
       "Bash(~/.claude/bin/cs-direct *)",
-      "Bash(~/.claude/bin/java-direct *)"
+      "Bash(~/.claude/bin/java-direct *)",
+      "Bash(~/.claude/bin/sbt-direct *)",
+      "Bash(~/.claude/bin/dotnet-direct *)",
+      "Bash(~/.claude/bin/prettier-direct *)",
+      "Bash(~/.claude/bin/eslint-direct *)",
+      "Bash(~/.claude/bin/scalafmt-direct *)"
     ] | unique)
     | .sandbox.filesystem.allowWrite = ((.sandbox.filesystem.allowWrite // []) + [
       "~/.cache/metals-direct/**",
@@ -104,6 +143,11 @@ if [ -f "$SETTINGS" ]; then
       "~/.cache/ts-direct/**",
       "~/.cache/cs-direct/**",
       "~/.cache/java-direct/**",
+      "~/.cache/sbt-direct/**",
+      "~/.cache/dotnet-direct/**",
+      "~/.cache/prettier-direct/**",
+      "~/.cache/eslint-direct/**",
+      "~/.cache/scalafmt-direct/**",
       "~/.eclipse/**"
     ] | unique)
   ' "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
@@ -125,7 +169,13 @@ next steps:
                 @vue/typescript-plugin@3.2.6 typescript@5.9.3 # vue
        dotnet tool install -g csharp-ls                      # csharp
        brew install metals                                   # scala
-  2. verify:
+       brew install jdtls                                    # java
+  2. (optional) install build tools / formatters for the opt-in wrappers:
+       brew install sbt                                      # sbt-direct
+       # dotnet-direct — already have dotnet from csharp-ls step
+       npm i -g prettier eslint                              # prettier-direct, eslint-direct
+       cs install scalafmt                                   # scalafmt-direct (coursier required)
+  3. verify:
        ./scripts/verify.sh
-  3. read docs/per-language/<lang>.md for each language you use
+  4. read docs/per-language/<lang>.md for each language you use
 DONE
