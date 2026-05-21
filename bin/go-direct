@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# go-direct — proxy gopls over persistent HTTP; per-workspace isolation; LSP-workaround convention per rules/lsp.md
+# subcommands: start [workspace] | call <method> <json-params> [workspace] | stop [workspace] | status | tools [workspace]
+set -euo pipefail
+
+STATE_ROOT="${GO_DIRECT_STATE:-$HOME/.cache/go-direct}"
+PROXY="$HOME/.claude/bin/lsp-stdio-proxy.js"
+LSP_BIN="gopls"
+LSP_ARGS=()
+LANG_ID="go"
+WORKSPACE_MARKERS=(go.work go.mod)
+
+die() { echo "go-direct: $*" >&2; exit 1; }
+
+resolve_workspace() {
+  local ws="${1:-}"
+  if [ -n "$ws" ]; then ws="$(cd "$ws" && pwd)"; echo "$ws"; return; fi
+  ws="$PWD"
+  while [ "$ws" != "/" ]; do
+    for marker in "${WORKSPACE_MARKERS[@]}"; do
+      [ -e "$ws/$marker" ] && { echo "$ws"; return; }
+    done
+    ws="$(dirname "$ws")"
+  done
+  echo "$PWD"
+}
+
+state_dir() {
+  local hash
+  hash="$(printf '%s' "$1" | shasum | awk '{print $1}' | cut -c1-12)"
+  echo "$STATE_ROOT/$hash"
+}
+
+free_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
+state_get() { [ -f "$1/$2" ] && cat "$1/$2" || echo ""; }
+
+port_ready() {
+  curl -fsS -m 2 "http://127.0.0.1:$1/health" >/dev/null 2>&1
+}
+
+server_alive() {
+  local port; port="$(state_get "$1" port)"
+  [ -z "$port" ] && return 1
+  port_ready "$port"
+}
+
+cmd_start() {
+  command -v "$LSP_BIN" >/dev/null || die "$LSP_BIN not on PATH — install via 'go install golang.org/x/tools/gopls@latest' and ensure \$(go env GOPATH)/bin is on PATH"
+  [ -f "$PROXY" ] || die "proxy missing: $PROXY"
+  local ws dir port pid
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  mkdir -p "$dir"
+  if server_alive "$dir"; then
+    echo "already running: workspace=$ws port=$(state_get "$dir" port) pid=$(state_get "$dir" pid)"
+    return 0
+  fi
+  port="$(free_port)"
+  echo "$ws" > "$dir/workspace"
+  echo "$port" > "$dir/port"
+  nohup node "$PROXY" --tool-name go-direct --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${LSP_ARGS[@]+"${LSP_ARGS[@]}"}" >"$dir/log" 2>&1 &
+  pid=$!
+  echo "$pid" > "$dir/pid"
+  local i=0
+  until port_ready "$port"; do
+    sleep 1
+    i=$((i+1))
+    [ "$i" -ge 30 ] && { kill "$pid" 2>/dev/null; die "proxy did not bind port $port within 30s — check $dir/log"; }
+  done
+  echo "started: workspace=$ws port=$port pid=$pid state=$dir"
+}
+
+cmd_call() {
+  local method="${1:-}"; shift || true
+  local params_json="${1-}"; shift || true
+  [ -z "$params_json" ] && params_json='{}'
+  [ -z "$method" ] && die "usage: go-direct call <method> '<json-params>' [workspace]"
+  local ws dir port
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  local payload
+  payload="$(jq -cn --arg method "$method" --argjson params "$params_json" '{method:$method,params:$params}')"
+  curl -fsS -m 120 "http://localhost:$port/lsp" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "lsp call failed (method=$method) — verify method name via '$0 tools' and daemon health via '$0 status'"
+  echo
+}
+
+cmd_batch() {
+  local method="${1:-}"; shift || true
+  [ -z "$method" ] && die "usage: go-direct batch <method> <file>... — each <file> becomes {textDocument:{uri:'file://<abs>'}}; non-textDocument shapes MUST use batch-json"
+  [ "$#" -eq 0 ] && die "batch requires >=1 file path"
+  local files=()
+  local f abs dir base
+  for f in "$@"; do
+    case "$f" in
+      /*) abs="$f" ;;
+      *)
+        dir="$(cd "$(dirname -- "$f")" 2>/dev/null && pwd)" || die "cannot resolve directory of $f"
+        base="$(basename -- "$f")"
+        abs="$dir/$base"
+        ;;
+    esac
+    files+=("$abs")
+  done
+  local first_dir ws state port calls_json payload
+  first_dir="$(dirname -- "${files[0]}")"
+  ws="$(resolve_workspace "$first_dir")"
+  state="$(state_dir "$ws")"
+  server_alive "$state" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$state" port)"
+  calls_json="$(printf '%s\n' "${files[@]}" | jq -R -s -c --arg m "$method" '
+    split("\n") | map(select(length>0)) | map({method: $m, params: {textDocument: {uri: ("file://" + .)}}})
+  ')"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch failed (method=$method) — verify daemon health via '$0 status'"
+  echo
+}
+
+cmd_batch_json() {
+  local calls_json="${1-}"; shift || true
+  [ -z "$calls_json" ] && die "usage: go-direct batch-json '<json-array of {method,params}>' [workspace]"
+  local ws state port payload
+  ws="$(resolve_workspace "${1:-}")"
+  state="$(state_dir "$ws")"
+  server_alive "$state" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$state" port)"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch-json failed — verify daemon health via '$0 status'"
+  echo
+}
+
+cmd_tools() {
+  cat <<EOF
+go-direct exposes raw LSP methods (gopls surface).
+invoke single: go-direct call <method> '<json-params>' [workspace]
+invoke batch:  go-direct batch <method> <file>... [files...]
+               go-direct batch-json '<json-array>' [workspace]
+
+common methods:
+  textDocument/documentSymbol       outline of a .go file
+  textDocument/hover                type + godoc at position
+  textDocument/definition           jump to definition
+  textDocument/references           find references
+  textDocument/typeDefinition       jump to type
+  textDocument/implementation       find implementations of an interface
+  textDocument/completion           completions at position
+  textDocument/signatureHelp        call signature
+  textDocument/prepareCallHierarchy get call-hierarchy handle
+  callHierarchy/incomingCalls       callers
+  callHierarchy/outgoingCalls       callees
+  workspace/symbol                  fuzzy search across module + transitive deps
+
+params MUST include textDocument.uri as file://<abs-path> for textDocument/* methods.
+
+examples:
+  go-direct call textDocument/documentSymbol '{"textDocument":{"uri":"file:///path/to/file.go"}}'
+  go-direct batch textDocument/documentSymbol /abs/a.go /abs/b.go /abs/c.go
+  go-direct batch-json '[{"method":"workspace/symbol","params":{"query":"Tracker"}},{"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///abs/x.go"},"position":{"line":0,"character":0}}}]'
+
+batch return shape: {results:[{ok:true,value}|{ok:false,error}]} per sub-call — one bad uri NEVER poisons siblings.
+EOF
+}
+
+cmd_stop() {
+  local ws dir pid
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  pid="$(state_get "$dir" pid)"
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null && echo "stopped: pid=$pid workspace=$ws" || echo "kill failed (pid=$pid) — state cleared for $ws"
+  else
+    echo "no pid for $ws"
+  fi
+  rm -f "$dir/pid" "$dir/port"
+}
+
+cmd_status() {
+  [ -d "$STATE_ROOT" ] || { echo "no servers tracked"; return; }
+  local any=0
+  for dir in "$STATE_ROOT"/*/; do
+    [ -d "$dir" ] || continue
+    any=1
+    local ws pid port alive
+    ws="$(state_get "$dir" workspace)"
+    pid="$(state_get "$dir" pid)"
+    port="$(state_get "$dir" port)"
+    alive="dead"
+    [ -n "$port" ] && port_ready "$port" && alive="alive"
+    printf 'workspace=%s  port=%s  pid=%s  %s\n' "$ws" "$port" "$pid" "$alive"
+  done
+  [ "$any" = 0 ] && echo "no servers tracked"
+}
+
+cmd_prune() {
+  [ -d "$STATE_ROOT" ] || { echo "no state dir"; return; }
+  local removed=0
+  for dir in "$STATE_ROOT"/*/; do
+    [ -d "$dir" ] || continue
+    local pid port alive=0
+    pid="$(state_get "$dir" pid)"
+    port="$(state_get "$dir" port)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=1; fi
+    if [ "$alive" = 0 ] && [ -n "$port" ] && port_ready "$port"; then alive=1; fi
+    if [ "$alive" = 0 ]; then
+      rm -rf "$dir"
+      removed=$((removed+1))
+    fi
+  done
+  echo "pruned $removed dead state dir(s) from $STATE_ROOT"
+}
+
+case "${1:-}" in
+  start)      shift; cmd_start "$@" ;;
+  call)       shift; cmd_call "$@" ;;
+  batch)      shift; cmd_batch "$@" ;;
+  batch-json) shift; cmd_batch_json "$@" ;;
+  tools)      shift; cmd_tools "$@" ;;
+  stop)       shift; cmd_stop "$@" ;;
+  status)     shift; cmd_status "$@" ;;
+  prune)      shift; cmd_prune "$@" ;;
+  ""|-h|--help)
+    cat <<EOF
+go-direct — proxy gopls over persistent HTTP; one server per workspace
+
+usage:
+  go-direct start [workspace]                              spawn proxy for workspace (default: cwd walking up for go.work/go.mod)
+  go-direct call <method> '<json-params>' [ws]             issue raw LSP method — auto-starts server
+  go-direct batch <method> <file>... [files...]            multi-file LSP fan-out — builds {textDocument:{uri:'file://<abs>'}} per file
+  go-direct batch-json '<json-array>' [ws]                 raw multi-call passthrough — array of {method,params}
+  go-direct tools                                          list LSP method surface
+  go-direct stop [workspace]                               kill server for workspace
+  go-direct status                                         show all tracked servers
+  go-direct prune                                          remove state dirs for dead servers
+
+workspace markers (walk-up order): ${WORKSPACE_MARKERS[*]}
+
+state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log}
+
+install: go install golang.org/x/tools/gopls@latest  (ensure \$(go env GOPATH)/bin on PATH)
+EOF
+    ;;
+  *) die "unknown subcommand: $1 (try --help)" ;;
+esac
