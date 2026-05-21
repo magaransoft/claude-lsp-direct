@@ -67,6 +67,57 @@ Also extend `EXT_LANG`, `RG_TYPE_LANG`, and `POS_CODE_FILE_RE` to include the ne
 ### 8. Update README.md + docs/convention.md
 Add the new language to the primary-path table.
 
+### 9. Expose batch subcommands
+Every wrapper backed by `tool-server-proxy.js` or `node-formatter-daemon.js` (i.e. anything that ships `cmd_call` posting to `/call`) MUST also ship `cmd_batch_json` posting to `/batch`. LSP-shaped wrappers (the backing protocol is per-textDocument) MUST additionally ship `cmd_batch <method> <file>...` building `{textDocument:{uri:"file://<abs>"}}` per file. Workspace MUST be derived from `dirname` of the first file (`resolve_workspace "$first_dir"`), NEVER from `$PWD` via empty `resolve_workspace ""`.
+
+Template (LSP-shaped):
+```bash
+cmd_batch() {
+  local method="${1:-}"; shift || true
+  [ -z "$method" ] && die "usage: <lang>-direct batch <method> <file>..."
+  [ "$#" -eq 0 ] && die "batch requires >=1 file path"
+  local files=()
+  local f abs dir base
+  for f in "$@"; do
+    case "$f" in
+      /*) abs="$f" ;;
+      *) dir="$(cd "$(dirname -- "$f")" 2>/dev/null && pwd)" || die "cannot resolve directory of $f"
+         base="$(basename -- "$f")"; abs="$dir/$base" ;;
+    esac
+    files+=("$abs")
+  done
+  local first_dir ws state port calls_json payload
+  first_dir="$(dirname -- "${files[0]}")"
+  ws="$(resolve_workspace "$first_dir")"
+  state="$(state_dir "$ws")"
+  server_alive "$state" || { cmd_start "$ws" >&2; }
+  port="$(state_get "$state" port)"
+  calls_json="$(printf '%s\n' "${files[@]}" | jq -R -s -c --arg m "$method" '
+    split("\n") | map(select(length>0)) | map({method: $m, params: {textDocument: {uri: ("file://" + .)}}})
+  ')"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST -H 'Content-Type: application/json' -d "$payload"
+  echo
+}
+
+cmd_batch_json() {
+  local calls_json="${1-}"; shift || true
+  [ -z "$calls_json" ] && die "usage: <lang>-direct batch-json '<json-array>'"
+  local ws state port payload
+  ws="$(resolve_workspace "${1:-}")"
+  state="$(state_dir "$ws")"
+  server_alive "$state" || { cmd_start "$ws" >&2; }
+  port="$(state_get "$state" port)"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST -H 'Content-Type: application/json' -d "$payload"
+  echo
+}
+```
+
+Wire into the case statement: `batch) shift; cmd_batch "$@" ;;` and `batch-json) shift; cmd_batch_json "$@" ;;`. Update `cmd_tools` text to advertise both. Non-LSP wrappers (formatters, build tools) ship `cmd_batch_json` only — `batch <method> <file>...` makes no sense for project-grain verbs.
+
+Transport-incompatible wrappers (e.g. scala-direct talks MCP, not `/batch`) MAY skip both — document the reason in the wrapper's `cmd_tools` block so the omission is intentional, not accidental.
+
 ## Hybrid servers (require paired processes)
 
 If the target LSP requires a paired companion process (like Vue LS v3 + tsserver + `@vue/typescript-plugin`), the generic `lsp-stdio-proxy.js` isn't enough. Write a dedicated adapter in `bin/adapters/<name>.js` declaring two child specs:
@@ -125,6 +176,7 @@ See [docs/convention.md](docs/convention.md) for the full list.
 
 ## PR checklist
 - [ ] Wrapper follows the CLI contract above
+- [ ] `cmd_batch_json` wired (all wrappers); `cmd_batch <method> <file>...` wired for LSP-shaped wrappers; both advertised in `cmd_tools`
 - [ ] Fixture added with a minimal sample
 - [ ] Doc page added under `docs/per-language/<lang>.md`
 - [ ] CI job added for the new language

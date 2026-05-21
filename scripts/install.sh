@@ -12,7 +12,7 @@ CLAUDE="${CLAUDE:-$HOME/.claude}"
 # bin files (wrappers + coordinators + shared harness modules)
 BIN_FILES=(
   # LSP wrappers
-  metals-direct vue-direct py-direct ts-direct cs-direct java-direct
+  scala-direct vue-direct py-direct ts-direct cs-direct java-direct
   # LSP coordinators (shim entrypoints)
   vue-direct-coordinator.js lsp-stdio-proxy.js
   # Opt-in build-tool wrappers + coordinators
@@ -40,7 +40,7 @@ command -v node >/dev/null || die "node required (>=18)"
 command -v python3 >/dev/null || die "python3 required (>=3.9)"
 
 [ -d "$CLAUDE" ] || {
-  log "~/.claude not found — are you using Claude Code?"
+  log "\$HOME/.claude not found — are you using Claude Code?"
   log "manual alternative: symlink $REPO/bin/* into any dir on your PATH"
   exit 1
 }
@@ -125,7 +125,7 @@ if [ -f "$SETTINGS" ]; then
   TMP="$(mktemp "${TMPDIR:-/tmp}/install.XXXXXX")"
   jq '
     .permissions.allow = ((.permissions.allow // []) + [
-      "Bash(~/.claude/bin/metals-direct *)",
+      "Bash(~/.claude/bin/scala-direct *)",
       "Bash(~/.claude/bin/vue-direct *)",
       "Bash(~/.claude/bin/py-direct *)",
       "Bash(~/.claude/bin/ts-direct *)",
@@ -138,7 +138,7 @@ if [ -f "$SETTINGS" ]; then
       "Bash(~/.claude/bin/scalafmt-direct *)"
     ] | unique)
     | .sandbox.filesystem.allowWrite = ((.sandbox.filesystem.allowWrite // []) + [
-      "~/.cache/metals-direct/**",
+      "~/.cache/scala-direct/**",
       "~/.cache/vue-direct/**",
       "~/.cache/py-direct/**",
       "~/.cache/ts-direct/**",

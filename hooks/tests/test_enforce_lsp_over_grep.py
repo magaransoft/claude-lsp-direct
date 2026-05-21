@@ -475,19 +475,21 @@ def test_compound_command_legit_passthrough(fake_home, cmd):
 
 
 def test_escalation_banner_after_threshold(fake_home):
+    # ESCALATE_THRESHOLD = 2 (2026-05-15): banner fires AT the 2nd block, not the 3rd.
+    # Empirical: equinox#5943 audit showed 28 cumulative grep-on-source blocks across
+    # 14 subagents because the prior threshold (3) gave too much rope.
     _scala_ready(fake_home)
     sid = "esc-session"
-    for _ in range(2):  # first ESCALATE_THRESHOLD-1 blocks: no banner
-        rc, _, err = _run({**_bash('grep -rn Foo /repo --include="*.scala"'), "session_id": sid}, fake_home)
-        assert rc == 2 and "ESCALATION" not in err, err
+    rc, _, err = _run({**_bash('grep -rn Foo /repo --include="*.scala"'), "session_id": sid}, fake_home)
+    assert rc == 2 and "ESCALATION" not in err, err  # 1st block: no banner
     rc, _, err = _run({**_bash('grep -rn Foo /repo --include="*.scala"'), "session_id": sid}, fake_home)
     assert rc == 2
-    assert "ESCALATION" in err and "metals-direct" in err
+    assert "ESCALATION" in err and "metals-direct" in err  # 2nd block: banner
     # different session is unaffected
     rc, _, err = _run({**_bash('grep -rn Foo /repo --include="*.scala"'), "session_id": "other"}, fake_home)
     assert rc == 2 and "ESCALATION" not in err, err
     counts = json.loads((fake_home / ".claude" / "locks" / "lsp-grep-block-counts.json").read_text())
-    assert counts[sid]["scala"] >= 3
+    assert counts[sid]["scala"] >= 2
     assert counts["other"]["scala"] == 1
 
 
@@ -525,8 +527,9 @@ def test_bump_block_count_and_banner(hook_module, tmp_path, monkeypatch):
     assert hook_module._bump_block_count("s", ["scala"]) == {"scala": 1}
     assert hook_module._bump_block_count("s", ["scala"]) == {"scala": 2}
     assert hook_module._bump_block_count("s", ["scala"]) == {"scala": 3}
-    assert hook_module._escalation_banner({"scala": 2}) == ""          # below threshold
-    banner = hook_module._escalation_banner({"scala": 3, "python": 1})
+    # ESCALATE_THRESHOLD = 2 (2026-05-15): banner fires AT count 2, not 3.
+    assert hook_module._escalation_banner({"scala": 1}) == ""          # below threshold
+    banner = hook_module._escalation_banner({"scala": 2, "python": 1})
     assert "ESCALATION" in banner and "metals-direct" in banner
     assert "py-direct" not in banner                                   # python under threshold
     assert json.loads(counts_file.read_text())["s"]["scala"] == 3

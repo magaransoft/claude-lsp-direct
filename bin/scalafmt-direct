@@ -90,6 +90,21 @@ cmd_call() {
   echo
 }
 
+cmd_batch_json() {
+  local calls_json="${1-}"; shift || true
+  [ -z "$calls_json" ] && die "usage: scalafmt-direct batch-json '<json-array of {method,params}>' [workspace]"
+  local ws dir port payload
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch-json failed — verify daemon health via '$0 status'"
+  echo
+}
+
 cmd_tools() {
   cat <<EOF
 scalafmt-direct methods (one-shot mode — each call runs scalafmt as a subprocess):
@@ -111,6 +126,11 @@ invoke:
   scalafmt-direct call version      '{}' [workspace]
   scalafmt-direct call format-stdin '{"source":"object A{}","filepath":"A.scala"}'
   scalafmt-direct call check-files  '{"files":["src/main/scala/A.scala"]}'
+
+batch (format-files/check-files already accept files[]; use batch-json for mixed-method fan-out):
+  scalafmt-direct batch-json '[{"method":"check-files","params":{"files":["src/A.scala"]}},{"method":"check-files","params":{"files":["src/B.scala"]}}]' [ws]
+
+batch return shape: {results:[{ok:true,value}|{ok:false,error}]} per sub-call — one bad sub-call NEVER poisons siblings.
 
 cold-start per call is 3-5s (scalafmt JVM boot + classloader). A
 persistent-JVM adapter (scalafmt-dynamic API in a long-running JVM) is
@@ -149,11 +169,12 @@ cmd_status() {
 }
 
 case "${1:-}" in
-  start)  shift; cmd_start "$@" ;;
-  call)   shift; cmd_call "$@" ;;
-  tools)  shift; cmd_tools "$@" ;;
-  stop)   shift; cmd_stop "$@" ;;
-  status) shift; cmd_status "$@" ;;
+  start)      shift; cmd_start "$@" ;;
+  call)       shift; cmd_call "$@" ;;
+  batch-json) shift; cmd_batch_json "$@" ;;
+  tools)      shift; cmd_tools "$@" ;;
+  stop)       shift; cmd_stop "$@" ;;
+  status)     shift; cmd_status "$@" ;;
   ""|-h|--help)
     cat <<EOF
 scalafmt-direct — per-workspace scalafmt coordinator
@@ -161,6 +182,7 @@ scalafmt-direct — per-workspace scalafmt coordinator
 usage:
   scalafmt-direct start [workspace]
   scalafmt-direct call <method> '<json-params>' [workspace]
+  scalafmt-direct batch-json '<json-array>' [workspace]   # multi-method fan-out
   scalafmt-direct tools
   scalafmt-direct stop [workspace]
   scalafmt-direct status

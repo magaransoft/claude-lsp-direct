@@ -6,9 +6,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### BREAKING
+- `bin/metals-direct` → `bin/scala-direct` rename (2026-05-20). Naming consistency with `py-direct`/`ts-direct`/`cs-direct`/`java-direct`/`go-direct`/`vue-direct` — every other wrapper was named after the language; `metals-direct` was the outlier named after the LSP server. Rename removes the recurring `scala-direct` misnomer trap (sessions kept typing the natural extrapolation as if it existed). Hard cut: old binary symlink removed, env var `METALS_DIRECT_STATE` no longer honored, legacy state dir `~/.cache/metals-direct/` no longer read. Upstream attribution to [@NovaMage](https://github.com/NovaMage)'s `agents-metals-direct-lsp` (original name source) preserved verbatim in README. External installs MUST update wrapper invocations from `metals-direct` → `scala-direct`, set `SCALA_DIRECT_STATE` if customising state path, and run the one-shot migration in `MIGRATION.md § scala-direct rename (2026-05-20)` to move state.
+
 ### Added
-- `bin/{metals,py,ts,cs,vue,java}-direct prune` — new subcommand removes state dirs whose recorded process is dead AND whose port is unreachable. Eliminates accumulating "dead" entries in `status` output across worktree-add/worktree-remove cycles. `metals-direct status` now also reports `adopted` (running but launched externally, e.g. by IDE) distinct from `alive` (launched by this wrapper) and `dead`.
+- `bin/tool-harness.js § serveHttp` — POST `/batch` route. Accepts `{calls:[{method,params},...]}`, validates non-empty array + per-entry `method` field, dispatches to caller-supplied `onBatch({calls})` callback. Returns `{results:[{ok:true,value}|{ok:false,error}]}` per sub-call so one bad sub-call NEVER poisons siblings. Empty array → HTTP 400 `{error:"empty calls"}`. Coordinators without an `onBatch` callback return HTTP 501.
+- `bin/tool-server-proxy.js` + `bin/node-formatter-daemon.js` — `onBatch` implementation. `invalidator.check()` runs exactly once per batch (not per sub-call); `adapter.call` fan-out via `Promise.all` with per-sub-call try/catch envelope; `callLog` emits one line per sub-call to preserve confidence_report.py per-method telemetry granularity. LSP children handle concurrent JSON-RPC IDs natively via `jsonRpcClient` pending-map; node-formatter daemons (prettier/eslint) parallelize sync calls.
+- `bin/{ts,py,cs,java,vue}-direct batch <method> <file>...` — multi-file LSP convenience. Builds `{textDocument:{uri:"file://<abs>"}}` per file; workspace derived from first file's dir via walk-up. Required when querying ≥2 files with the same method (one HTTP roundtrip + one tool_result). Non-textDocument shapes use `batch-json` instead.
+- `bin/{ts,py,cs,java,vue,prettier,eslint,scalafmt,sbt,dotnet}-direct batch-json '<json-array>'` — raw multi-call passthrough. Accepts `[{method,params},...]`. Available on every wrapper backed by tool-server-proxy or node-formatter-daemon. `scala-direct` excluded (MCP transport, no `/batch` surface).
+- `bin/adapters/prettier.js` — `format-files` and `check-files` methods accepting `{files:[abs-path,...]}`. Mirrors `bin/adapters/scalafmt-cli.js § format-files` and `bin/adapters/eslint.js § lint-files` shape. Per-file envelope `{ok:true,filepath,formatted,changed}` or `{ok:false,filepath,error}`.
+- `hooks/enforce-batch-on-direct-call.py` — new PreToolUse hook. Detects `<wrapper>-direct call <method>` invocations; on 2nd same-tuple `(session_id, wrapper, method)` within 60s, exits 2 with stderr suggesting `batch <method> <file>...` (LSP wrappers) or `batch-json '<json>'` (any wrapper). 1st call NEVER blocked. Different-method same-wrapper sequences NEVER blocked. Different-session same-method NEVER blocked. scala-direct excluded. Ledger at `~/.claude/locks/recent-direct-calls.json` caps to entries ≤5min on every write. Telemetry at `~/.claude/.metrics/batch-enforcement.log` (jsonl, rotates at 256KB → `.log.1`). 13 unit tests in `hooks/tests/test_enforce_batch_on_direct_call.py`. Registered in `~/.claude/settings.json § hooks.PreToolUse[Bash]`.
+- `hooks/enforce-lsp-over-grep.py § lsp_suggestion` — suggestion strings now advertise the `batch` + `batch-json` invocations alongside per-file `call` examples for every supported wrapper.
+- `bin/{metals,py,ts,cs,vue,java}-direct prune` — new subcommand removes state dirs whose recorded process is dead AND whose port is unreachable. Eliminates accumulating "dead" entries in `status` output across worktree-add/worktree-remove cycles. `scala-direct status` now also reports `adopted` (running but launched externally, e.g. by IDE) distinct from `alive` (launched by this wrapper) and `dead`.
 - `bin/cs-roslyn-direct` (scaffold, NOT wired into install) — parallel C# wrapper targeting Microsoft Roslyn Language Server (the binary shipped with VS Code C# Dev Kit) instead of csharp-ls. Goal: ≥10× cold-start improvement on `documentSymbol`. Currently blocked by reverse-RPC gap in `bin/lsp-stdio-proxy.js` (Roslyn LS issues `workspace/configuration` server→client during `initialized` and SIGABRTs without a response). See `docs/per-language/csharp.md` § Roslyn LS scaffold for resumption path.
+
+### Cost evidence (multi-file query: documentSymbol on 3 .ts files)
+Before: 3× `ts-direct call …` invocations → 3 bash tool_use blocks + 3 tool_result blocks (≈3× curl/jq/header overhead per turn).
+After: 1× `ts-direct batch textDocument/documentSymbol /abs/A.ts /abs/B.ts /abs/C.ts` → 1 bash + 1 tool_result with `{results:[3 entries]}`. Smoke verified on `~/projects/parlor/apps/backend` against 2 .ts files: 130KB JSON returned in a single roundtrip, daemon spawned existing LSP child concurrently for both via `jsonRpcClient` pending-map.
 
 ### Changed
 - `bin/{py,ts,cs,vue,java}-direct` — error message on HTTP 500 from underlying LSP now includes the failed method name AND retry hints (`<wrapper> tools` to verify method shape, `<wrapper> status` to verify daemon health). Previously a bare "lsp call failed" left callers with no recovery signal — observed in equinox session b8957617 audit (2026-05-06) where the orchestrator silently fell back to grep instead of retrying via the wrapper.
@@ -100,7 +114,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ## [1.0.0] — 2026-04-21
 
 ### Added
-- `bin/metals-direct` — Scala via metals-mcp over HTTP (17 semantic tools)
+- `bin/scala-direct` — Scala via metals-mcp over HTTP (17 semantic tools)
 - `bin/vue-direct` + `bin/vue-direct-coordinator.js` — Vue LS v3 hybrid bridge (Vue LS + tsserver + `@vue/typescript-plugin`)
 - `bin/py-direct` — pyright-langserver proxy
 - `bin/ts-direct` — typescript-language-server proxy

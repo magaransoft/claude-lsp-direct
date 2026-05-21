@@ -97,6 +97,21 @@ cmd_call() {
   echo
 }
 
+cmd_batch_json() {
+  local calls_json="${1-}"; shift || true
+  [ -z "$calls_json" ] && die "usage: dotnet-direct batch-json '<json-array of {method,params}>' [workspace]"
+  local ws dir port payload
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch-json failed — verify daemon health via '$0 status'"
+  echo
+}
+
 cmd_tools() {
   cat <<EOF
 dotnet-direct methods (per-call subprocess; MSBuild build-server warms persists across calls automatically):
@@ -127,6 +142,11 @@ invoke:
   dotnet-direct call test    '{"filter":"Category=Unit"}' [workspace]
   dotnet-direct call restore '{}'                        [workspace]
   dotnet-direct call command '{"args":["tool","list"]}' [workspace]
+
+batch (dotnet verbs are project-grain — file-batch convenience N/A; use batch-json):
+  dotnet-direct batch-json '[{"method":"restore","params":{}},{"method":"build","params":{"configuration":"Release"}}]' [ws]
+
+batch return shape: {results:[{ok:true,value}|{ok:false,error}]} per sub-call — one bad sub-call NEVER poisons siblings.
 
 timing: cold-start per call 5-10s; warm (build-server hot) sub-second for no-op builds.
 EOF
@@ -163,11 +183,12 @@ cmd_status() {
 }
 
 case "${1:-}" in
-  start)  shift; cmd_start "$@" ;;
-  call)   shift; cmd_call "$@" ;;
-  tools)  shift; cmd_tools "$@" ;;
-  stop)   shift; cmd_stop "$@" ;;
-  status) shift; cmd_status "$@" ;;
+  start)      shift; cmd_start "$@" ;;
+  call)       shift; cmd_call "$@" ;;
+  batch-json) shift; cmd_batch_json "$@" ;;
+  tools)      shift; cmd_tools "$@" ;;
+  stop)       shift; cmd_stop "$@" ;;
+  status)     shift; cmd_status "$@" ;;
   ""|-h|--help)
     cat <<EOF
 dotnet-direct — per-workspace dotnet coordinator
@@ -175,6 +196,7 @@ dotnet-direct — per-workspace dotnet coordinator
 usage:
   dotnet-direct start [workspace]
   dotnet-direct call <method> '<json-params>' [workspace]
+  dotnet-direct batch-json '<json-array>' [workspace]   # multi-verb fan-out (dotnet verbs are project-grain)
   dotnet-direct tools
   dotnet-direct stop [workspace]
   dotnet-direct status

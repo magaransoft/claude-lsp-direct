@@ -39,7 +39,19 @@ vue-direct call textDocument/documentSymbol \
 vue-direct call textDocument/hover \
   '{"textDocument":{"uri":"file:///abs/path/to/Component.vue"},
     "position":{"line":15,"character":8}}'
+
+# multi-file fan-out (1 HTTP roundtrip + 1 tool_result for N files)
+vue-direct batch textDocument/documentSymbol \
+  /abs/path/to/A.vue /abs/path/to/B.vue /abs/path/to/C.vue
+
+# raw multi-call (mixed methods)
+vue-direct batch-json '[
+  {"method":"workspace/symbol","params":{"query":"UserCard"}},
+  {"method":"textDocument/foldingRange","params":{"textDocument":{"uri":"file:///abs/x.vue"}}}
+]'
 ```
+
+When querying >=2 files with the same method, callers MUST use `batch` (or `batch-json`) — the `enforce-batch-on-direct-call.py` PreToolUse hook blocks 2nd same-method `call` within 60s. Per-call envelope `{ok:true,value}|{ok:false,error}` returned per sub-call so one bad uri NEVER poisons siblings.
 
 ## The hybrid protocol
 Vue LS v3 architecturally requires a paired tsserver with `@vue/typescript-plugin` loaded. Semantic ops (`textDocument/hover`, `textDocument/definition`, etc.) work as follows:

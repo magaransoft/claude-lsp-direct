@@ -197,6 +197,36 @@ async function createProxy({ adapter, workspace, port, toolName }) {
         throw e;
       }
     },
+    // onBatch — fan-out across adapter.call concurrently. invalidator.check
+    // MUST run exactly once at batch entry per plan § decisions-locked. logCall
+    // emits one line per sub-call to preserve confidence_report.py granularity.
+    // Per-sub-call try/catch isolates failures so one bad call NEVER poisons
+    // siblings — return shape per call: {ok:true,value} | {ok:false,error}.
+    async onBatch({ calls }) {
+      invalidationFiredOnLastCall = false;
+      const r = await invalidator.check();
+      if (r.softChanged.length || r.hardChanged.length) invalidationFiredOnLastCall = true;
+      const invFired = invalidationFiredOnLastCall;
+      return Promise.all(calls.map(async ({ method, params }, i) => {
+        const subT0 = Date.now();
+        try {
+          const value = await adapter.call({ method, params: params || {} }, ctx);
+          logCall({
+            method, ms: Date.now() - subT0, adopted,
+            invalidation_fired: invFired && i === 0,
+            outcome: 'ok',
+          });
+          return { ok: true, value };
+        } catch (e) {
+          logCall({
+            method, ms: Date.now() - subT0, adopted,
+            invalidation_fired: invFired && i === 0,
+            outcome: 'error', error: e.message,
+          });
+          return { ok: false, error: e.message };
+        }
+      }));
+    },
   });
 
   return new Promise((resolve) => {

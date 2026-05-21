@@ -113,6 +113,21 @@ cmd_call() {
   echo
 }
 
+cmd_batch_json() {
+  local calls_json="${1-}"; shift || true
+  [ -z "$calls_json" ] && die "usage: sbt-direct batch-json '<json-array of {method,params}>' [workspace]"
+  local ws dir port payload
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch-json failed — verify daemon health via '$0 status'"
+  echo
+}
+
 cmd_tools() {
   cat <<EOF
 sbt-direct methods (current mode: $SBT_MODE):
@@ -140,6 +155,11 @@ invoke:
   sbt-direct call task '{"task":"compile"}' [workspace]    # oneshot
   SBT_DIRECT_MODE=bsp sbt-direct call compile '{}' [ws]    # bsp
   sbt-direct call build-targets '{}' [workspace]           # bsp introspection
+
+batch (sbt verbs are project-grain — file-batch convenience N/A; use batch-json):
+  sbt-direct batch-json '[{"method":"task","params":{"task":"compile"}},{"method":"task","params":{"task":"test"}}]' [ws]
+
+batch return shape: {results:[{ok:true,value}|{ok:false,error}]} per sub-call — one bad sub-call NEVER poisons siblings.
 
 see docs/per-language/sbt.md for timing + invalidation matrix.
 EOF
@@ -176,11 +196,12 @@ cmd_status() {
 }
 
 case "${1:-}" in
-  start)  shift; cmd_start "$@" ;;
-  call)   shift; cmd_call "$@" ;;
-  tools)  shift; cmd_tools "$@" ;;
-  stop)   shift; cmd_stop "$@" ;;
-  status) shift; cmd_status "$@" ;;
+  start)      shift; cmd_start "$@" ;;
+  call)       shift; cmd_call "$@" ;;
+  batch-json) shift; cmd_batch_json "$@" ;;
+  tools)      shift; cmd_tools "$@" ;;
+  stop)       shift; cmd_stop "$@" ;;
+  status)     shift; cmd_status "$@" ;;
   ""|-h|--help)
     cat <<EOF
 sbt-direct — per-workspace sbt coordinator
@@ -190,6 +211,7 @@ usage:
   sbt-direct call task '{"task":"compile"}' [workspace]
   sbt-direct call reload '{}' [workspace]
   sbt-direct call version '{}' [workspace]
+  sbt-direct batch-json '<json-array>' [workspace]   # multi-task fan-out (no per-file convenience — sbt verbs are project-grain)
   sbt-direct tools
   sbt-direct stop [workspace]
   sbt-direct status

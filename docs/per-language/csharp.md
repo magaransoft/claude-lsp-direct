@@ -26,7 +26,19 @@ cs-direct call textDocument/definition \
     "position":{"line":25,"character":15}}'
 
 cs-direct call workspace/symbol '{"query":"IUserService"}'
+
+# multi-file fan-out (1 HTTP roundtrip + 1 tool_result for N files)
+cs-direct batch textDocument/documentSymbol \
+  /abs/path/to/A.cs /abs/path/to/B.cs /abs/path/to/C.cs
+
+# raw multi-call (mixed methods)
+cs-direct batch-json '[
+  {"method":"workspace/symbol","params":{"query":"IUserService"}},
+  {"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///abs/x.cs"},"position":{"line":0,"character":0}}}
+]'
 ```
+
+When querying >=2 files with the same method, callers MUST use `batch` (or `batch-json`) — the `enforce-batch-on-direct-call.py` PreToolUse hook blocks 2nd same-method `call` within 60s. Per-call envelope `{ok:true,value}|{ok:false,error}` returned per sub-call so one bad uri NEVER poisons siblings.
 
 ## The rootUri-at-init fix
 `csharp-ls` binds `rootUri` at the `initialize` handshake and cannot change it. Starting `csharp-ls` from a cwd outside the `.sln`/`.csproj` ancestor means the server loads an empty workspace and every query returns "no symbols found" — a hard usability bottleneck for agentic clients switching between multiple .NET projects.

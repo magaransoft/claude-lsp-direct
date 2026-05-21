@@ -21,10 +21,15 @@ PLUGINS_FILE = HOME / ".claude" / "plugins" / "installed_plugins.json"
 METRICS_LOG = HOME / ".claude" / ".metrics" / "lsp-grep-blocks.log"
 # escalation: repeated grep-on-source blocks for the same lang within a session →
 # louder, tool-specific directive. counter reset by redeem-lsp-debt.py on <lang>-direct use.
+# threshold = 2 (was 3 pre-2026-05-15): empirical observation on equinox#5943 — agents
+# kept retrying grep through 28 cumulative blocks across 14 subagents (avg 2/each). After
+# the 2nd block the model has had enough signal; the 3rd is wasted budget. Lower threshold
+# triggers the "STATUS: PASS_PARTIAL" exit directive from ac-implementer.md § LSP-block
+# recovery discipline sooner — short-circuits the same-shape retry waste.
 BLOCK_COUNTS_FILE = HOME / ".claude" / "locks" / "lsp-grep-block-counts.json"
-ESCALATE_THRESHOLD = 3
+ESCALATE_THRESHOLD = 2
 DIRECT_WRAPPER_NAME = {
-    "scala": "metals-direct", "vue": "vue-direct", "python": "py-direct",
+    "scala": "scala-direct", "vue": "vue-direct", "python": "py-direct",
     "typescript": "ts-direct", "csharp": "cs-direct", "java": "java-direct",
 }
 
@@ -74,10 +79,10 @@ def load_plugins() -> set:
 
 
 def scala_info_fallback() -> dict:
-    metals_direct = HOME / ".claude" / "bin" / "metals-direct"
+    scala_direct = HOME / ".claude" / "bin" / "scala-direct"
     return {
-        "tool": "metals-direct",
-        "binary": str(metals_direct) if metals_direct.exists() else None,
+        "tool": "scala-direct",
+        "binary": str(scala_direct) if scala_direct.exists() else None,
         "backend": "metals-mcp" if shutil.which("metals-mcp") else None,
         "workspace": "",
     }
@@ -173,7 +178,25 @@ RG_GLOB_RE = re.compile(r"""-g[=\s]['"]*\*(\.\w+)['"]*""")
 # trailing boundary includes pipe/redirect/semicolon/ampersand to catch
 # `grep "x" /a/b.ts | head` and `grep "x" /a/b.ts > out` and `grep "x" /a/b.ts;echo`
 POS_CODE_FILE_RE = re.compile(r"""(?:^|\s)['"]?[^\s'"|&;<>]*(\.(?:scala|sbt|sc|py|ts|tsx|js|jsx|cs|vue|java))['"]?(?:\s|$|[|>;&])""")
+# same as POS_CODE_FILE_RE but captures the FULL path so exempt-path filtering can inspect directory components
+POS_CODE_FILE_PATH_RE = re.compile(r"""(?:^|\s)['"]?([^\s'"|&;<>]*\.(?:scala|sbt|sc|py|ts|tsx|js|jsx|cs|vue|java))['"]?(?:\s|$|[|>;&])""")
 _QUOTED_RE = re.compile(r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\$'(?:\\.|[^'\\])*'|\$"(?:\\.|[^"\\])*")""")
+
+# text-processing tools used as grep-equivalents on source — awk '/pat/' file.scala, sed -n '/pat/p' file.scala,
+# perl -ne '/pat/' file.scala. all are scan-with-pattern shapes that bypass LSP → same enforcement as grep
+TEXT_TOOL_HEADS = {"awk", "gawk", "mawk", "sed", "perl"}
+# interpreter-with-inline-script heads — python -c '<script>' file.scala, perl -e '<script>' file.scala,
+# ruby -e '<script>' file.rb. only block when -c/-e flag present AND positional source-file arg follows;
+# bare `python script.py` is fine (running code, not scanning it)
+INLINE_SCRIPT_HEADS = {"python", "python3", "perl", "ruby"}
+INLINE_SCRIPT_FLAG_RE = re.compile(r"(?:^|\s)-[ce](?:\s|$|[A-Za-z])")
+
+# exempt-path hints: source-extension files under these dirs are TEST FIXTURE / SNAPSHOT data;
+# legitimate to text-scan because the content is non-semantic (golden output, captured payloads).
+# matches when any path segment equals one of these names
+EXEMPT_PATH_RE = re.compile(
+    r"""(?:^|/)(?:fixtures?|__snapshots__|testdata|goldens?|test/resources|test/fixtures?|spec/fixtures?|tests?/data)/"""
+)
 
 
 def _strip_quoted(cmd: str) -> str:
@@ -189,16 +212,16 @@ def lsp_suggestion(lang: str, avail: dict) -> Optional[str]:
     if lang == "scala":
         if info.get("binary") and info.get("backend"):
             return (
-                f"use metals-direct instead of grep on *.scala/*.sbt/*.sc:\n"
-                f"  ~/.claude/bin/metals-direct call glob-search '{{\"query\":\"<symbol>\",\"fileInFocus\":\"<abs-path>\"}}' {info.get('workspace','')}\n"
-                f"  ~/.claude/bin/metals-direct call get-usages '{{\"fqcn\":\"<fqcn>\",\"module\":\"<mod>\"}}' {info.get('workspace','')}\n"
-                f"  ~/.claude/bin/metals-direct tools   # list all metals-mcp operations\n"
-                f"grep remains valid for config/data files — NOT source code. state explicitly why metals-direct could not answer before falling back."
+                f"use scala-direct instead of grep on *.scala/*.sbt/*.sc:\n"
+                f"  ~/.claude/bin/scala-direct call glob-search '{{\"query\":\"<symbol>\",\"fileInFocus\":\"<abs-path>\"}}' {info.get('workspace','')}\n"
+                f"  ~/.claude/bin/scala-direct call get-usages '{{\"fqcn\":\"<fqcn>\",\"module\":\"<mod>\"}}' {info.get('workspace','')}\n"
+                f"  ~/.claude/bin/scala-direct tools   # list all metals-mcp operations\n"
+                f"grep remains valid for config/data files — NOT source code. state explicitly why scala-direct could not answer before falling back."
             )
-        # scala workspace but metals-direct/metals-mcp missing → warn not block
+        # scala workspace but scala-direct/metals-mcp missing → warn not block
         missing = []
         if not info.get("binary"):
-            missing.append("~/.claude/bin/metals-direct wrapper")
+            missing.append("~/.claude/bin/scala-direct wrapper")
         if not info.get("backend"):
             missing.append("metals-mcp binary (brew install metals or cs install metals-mcp)")
         return f"[WARN not block] scala stack detected but missing: {', '.join(missing)}. grep allowed until installed."
@@ -288,7 +311,33 @@ def detect_langs(cmd: str) -> set:
             ext = m.group(1).lower()
             if ext in EXT_LANG:
                 langs.add(EXT_LANG[ext])
+    # text-processing tools (awk/sed/perl) used as grep-equivalents on source files
+    # same enforcement: positional source-file arg with code extension → bypass shape
+    if tool_head in TEXT_TOOL_HEADS:
+        for m in POS_CODE_FILE_RE.finditer(_strip_quoted(cmd)):
+            ext = m.group(1).lower()
+            if ext in EXT_LANG:
+                langs.add(EXT_LANG[ext])
+    # interpreters with inline-script flag (-c/-e) + positional source-file arg
+    # `python -c '<script>' file.scala`, `perl -e '<script>' file.scala`, `ruby -e '<script>' file.rb`
+    # bare `python script.py` is NOT this shape — must have -c/-e
+    if tool_head in INLINE_SCRIPT_HEADS and INLINE_SCRIPT_FLAG_RE.search(cmd):
+        for m in POS_CODE_FILE_RE.finditer(_strip_quoted(cmd)):
+            ext = m.group(1).lower()
+            if ext in EXT_LANG:
+                langs.add(EXT_LANG[ext])
     return langs
+
+
+def _all_source_paths_exempt(cmd: str) -> bool:
+    """true when EVERY source-extension positional path in cmd is under an exempt dir
+    (fixtures/, __snapshots__/, testdata/, etc.). returns False if no source paths matched —
+    caller decides whether absence-of-positional-arg means block or not (depends on tool shape).
+    """
+    paths = [m.group(1) for m in POS_CODE_FILE_PATH_RE.finditer(_strip_quoted(cmd))]
+    if not paths:
+        return False
+    return all(EXEMPT_PATH_RE.search(p) is not None for p in paths)
 
 
 def detect_langs_native_grep(inp: dict) -> set:
@@ -314,11 +363,24 @@ def detect_langs_native_grep(inp: dict) -> set:
 
 
 SEARCH_TOOL_HEADS = {"grep", "egrep", "fgrep", "rg", "find", "fd", "ack", "ag"}
+# extended set: heads where source-extension positional args still trigger the LSP-over-grep block.
+# text-tools always do; inline-script interpreters only when -c/-e flag present (gated in is_search_tool)
+_TEXT_AND_SCRIPT_HEADS = TEXT_TOOL_HEADS | INLINE_SCRIPT_HEADS
 
 
 def is_search_tool(cmd: str) -> bool:
+    """true when cmd head is a search tool OR a text-processing tool OR an inline-script
+    interpreter (the latter only when -c/-e flag present — bare `python script.py` is NOT
+    a text-scan shape).
+    """
     head = cmd.strip().split()[0] if cmd.strip() else ""
-    return head in SEARCH_TOOL_HEADS
+    if head in SEARCH_TOOL_HEADS:
+        return True
+    if head in TEXT_TOOL_HEADS:
+        return True
+    if head in INLINE_SCRIPT_HEADS and INLINE_SCRIPT_FLAG_RE.search(cmd):
+        return True
+    return False
 
 
 # recursive grep/rg without any file-type scope is an ambiguous-intent bypass of enforce-lsp-over-grep:
@@ -445,14 +507,20 @@ def _shell_segments(cmd: str) -> list:
 def scan_bash_command(cmd: str) -> tuple:
     """analyze a (possibly compound) Bash command; returns (unscoped_recursive, langs).
     unscoped_recursive: any segment is an unscoped recursive grep/rg.
-    langs: set of code languages targeted by extension across all search-tool segments."""
+    langs: set of code languages targeted by extension across all search-tool segments,
+    EXCLUDING segments where every positional source-path is under an exempt dir
+    (fixtures/, __snapshots__/, testdata/, etc. — text-scan on fixture data is legitimate)."""
     segments = [s for s in (seg.strip() for seg in _shell_segments(cmd)) if s]
     if not any(is_search_tool(s) for s in segments):
         return (False, set())
     unscoped = any(is_unscoped_recursive_grep(s) for s in segments)
     langs: set = set()
     for s in segments:
-        langs |= detect_langs(s)
+        seg_langs = detect_langs(s)
+        # skip when this segment's source-paths are ALL under exempt dirs — fixture/snapshot data
+        if seg_langs and _all_source_paths_exempt(s):
+            continue
+        langs |= seg_langs
     return (unscoped, langs)
 
 
@@ -504,6 +572,11 @@ def _escalation_banner(counts: dict) -> str:
             f"the ONLY acceptable next tool call for {lang} is ~/.claude/bin/{wrapper} (see per-language "
             f"commands below). do NOT vary the grep/find command and retry — switch tools."
         )
+    lines.append(
+        "subagents: per ac-implementer.md § LSP-block recovery discipline — after 2 blocks in the same "
+        "exploration step, MUST emit `STATUS: PASS_PARTIAL` with the blocked shape recorded in GAPS + "
+        "return to orchestrator. NEVER attempt a 3rd same-shape call. orchestrator decides respawn vs accept."
+    )
     return "\n".join(lines) + "\n\n"
 
 
@@ -612,6 +685,28 @@ def _selftest() -> int:
         ('npm test 2>&1 | grep -i error',                           (False, set())),
         ('cat changelog.md; rg "v1.2.3" docs/',                     (False, set())),
         ('ls -la && echo done',                                     (False, set())),
+        # text-processing bypass shapes (the session a7a0802b incident)
+        ("awk '/findCollectorByUserIdAndGroupId/{print}' /a/b.scala",  (False, {"scala"})),
+        ("awk '/x/{print NR}' /a/b/Foo.scala",                         (False, {"scala"})),
+        ('sed -n \'/Foo/p\' /a/b/foo.py',                              (False, {"python"})),
+        ("perl -ne 'print if /x/' /a/b.ts",                            (False, {"typescript"})),
+        # inline-script interpreter shapes — block only when -c/-e flag present
+        ("python3 -c 'open(\"/a/b.scala\").read()' /a/b.scala",         (False, {"scala"})),
+        ("python /usr/bin/normal-script.py",                            (False, set())),  # no -c, just running code
+        ("ruby -e 'puts File.read(ARGV[0])' /a/b.scala",                (False, {"scala"})),
+        # indirection bypass through bash -c
+        ('bash -c "awk \'/x/{print}\' /a/b.scala"',                    (False, {"scala"})),
+        ('sh -c "sed -n \'/x/p\' /a/b.py"',                            (False, {"python"})),
+        # exempt-path: fixture/snapshot dirs are legitimate text-scan targets
+        ("awk '/x/{print}' /a/__snapshots__/snapshot.scala",            (False, set())),
+        ("sed -n '/x/p' /a/test/fixtures/golden.py",                    (False, set())),
+        ("grep 'foo' /a/fixtures/sample.ts",                            (False, set())),
+        ("grep 'foo' /a/testdata/sample.scala",                         (False, set())),
+        ("awk '/x/' /a/goldens/expected.py",                            (False, set())),
+        # exempt-path doesn't cover unrelated dirs that happen to contain the word
+        ("awk '/x/{print}' /a/src/main/scala/Foo.scala",                (False, {"scala"})),
+        # git show piped to awk on source content → block (extracted source content is still source)
+        ("git show HEAD:src/Foo.scala | awk '/pattern/{print}'",        (False, set())),  # awk has no positional file arg here; intent ambiguous, allow
     ]
     for cmd, expected in scan_cases:
         got = scan_bash_command(cmd)

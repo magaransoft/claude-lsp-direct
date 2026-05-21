@@ -90,6 +90,21 @@ cmd_call() {
   echo
 }
 
+cmd_batch_json() {
+  local calls_json="${1-}"; shift || true
+  [ -z "$calls_json" ] && die "usage: eslint-direct batch-json '<json-array of {method,params}>' [workspace]"
+  local ws dir port payload
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { echo "daemon not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch-json failed — verify daemon health via '$0 status'"
+  echo
+}
+
 cmd_tools() {
   cat <<EOF
 eslint-direct methods (in-process eslint — warm calls <150ms):
@@ -108,6 +123,11 @@ eslint-direct methods (in-process eslint — warm calls <150ms):
 invoke:
   eslint-direct call lint-files '{"patterns":["src/**/*.ts"]}'
   eslint-direct call fix-text '{"source":"const x=1","filepath":"x.ts"}'
+
+batch (lint-files already accepts patterns[] natively; use batch-json for mixed-method fan-out):
+  eslint-direct batch-json '[{"method":"lint-files","params":{"patterns":["src/a/**/*.ts"]}},{"method":"lint-files","params":{"patterns":["src/b/**/*.ts"]}}]' [ws]
+
+batch return shape: {results:[{ok:true,value}|{ok:false,error}]} per sub-call — one bad pattern NEVER poisons siblings.
 EOF
 }
 
@@ -142,24 +162,26 @@ cmd_status() {
 }
 
 case "${1:-}" in
-  start)  shift; cmd_start "$@" ;;
-  call)   shift; cmd_call "$@" ;;
-  tools)  shift; cmd_tools "$@" ;;
-  stop)   shift; cmd_stop "$@" ;;
-  status) shift; cmd_status "$@" ;;
+  start)      shift; cmd_start "$@" ;;
+  call)       shift; cmd_call "$@" ;;
+  batch-json) shift; cmd_batch_json "$@" ;;
+  tools)      shift; cmd_tools "$@" ;;
+  stop)       shift; cmd_stop "$@" ;;
+  status)     shift; cmd_status "$@" ;;
   ""|-h|--help)
     cat <<EOF
-eslint-direct — per-workspace prettier daemon
+eslint-direct — per-workspace eslint daemon
 
 usage:
   eslint-direct start [workspace]
   eslint-direct call <method> '<json-params>' [workspace]
+  eslint-direct batch-json '<json-array>' [workspace]   # multi-method fan-out
   eslint-direct tools
   eslint-direct stop [workspace]
   eslint-direct status
 
 state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log,calls.log,triggers.json}
-install: prefer workspace-local via pnpm/npm; global fallback via 'npm i -g prettier'.
+install: prefer workspace-local via pnpm/npm; global fallback via 'npm i -g eslint'.
 EOF
     ;;
   *) die "unknown subcommand: $1 (try --help)" ;;

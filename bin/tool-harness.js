@@ -51,10 +51,12 @@ function freePort() {
   });
 }
 
-// serveHttp — loopback HTTP server exposing GET /health and POST
-// /call (canonical) + POST /lsp (back-compat alias for existing
-// wrappers). The caller supplies onCall({method, params}) → Promise<any>.
-function serveHttp(port, { onCall, meta, statusFn }) {
+// serveHttp — loopback HTTP server exposing GET /health, POST /call
+// (canonical) + POST /lsp (back-compat alias), and POST /batch
+// (multi-call fan-out). The caller supplies onCall({method, params})
+// → Promise<any>; optionally onBatch({calls}) → Promise<results[]>
+// where each result is {ok:true, value} | {ok:false, error}.
+function serveHttp(port, { onCall, onBatch, meta, statusFn }) {
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
       let extra = {};
@@ -85,6 +87,46 @@ function serveHttp(port, { onCall, meta, statusFn }) {
           const result = await onCall({ method, params: params || {} });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ result }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/batch') {
+      if (typeof onBatch !== 'function') {
+        res.writeHead(501, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'batch not supported by this coordinator' }));
+        return;
+      }
+      let body = '';
+      req.on('data', c => { body += c.toString('utf8'); });
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body); } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid JSON: ' + e.message }));
+          return;
+        }
+        const { calls } = payload;
+        if (!Array.isArray(calls) || calls.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'empty calls' }));
+          return;
+        }
+        for (let i = 0; i < calls.length; i++) {
+          const c = calls[i];
+          if (!c || typeof c !== 'object' || !c.method) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `calls[${i}] missing method` }));
+            return;
+          }
+        }
+        try {
+          const results = await onBatch({ calls });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ results }));
         } catch (e) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: e.message }));
