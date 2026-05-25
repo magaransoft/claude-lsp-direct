@@ -96,6 +96,34 @@ async function createDaemon({ adapter, workspace, port, toolName }) {
         throw e;
       }
     },
+    // onBatch — mirror of tool-server-proxy.onBatch. invalidator.check runs
+    // once per batch; adapter.call fans out via Promise.all; per-sub-call
+    // try/catch keeps one failure from poisoning siblings.
+    async onBatch({ calls }) {
+      invalidationFiredOnLastCall = false;
+      const r = await invalidator.check();
+      if (r.softChanged.length || r.hardChanged.length) invalidationFiredOnLastCall = true;
+      const invFired = invalidationFiredOnLastCall;
+      return Promise.all(calls.map(async ({ method, params }, i) => {
+        const subT0 = Date.now();
+        try {
+          const value = await adapter.call({ method, params: params || {} }, ctx);
+          logCall({
+            method, ms: Date.now() - subT0, adopted: false,
+            invalidation_fired: invFired && i === 0,
+            outcome: 'ok',
+          });
+          return { ok: true, value };
+        } catch (e) {
+          logCall({
+            method, ms: Date.now() - subT0, adopted: false,
+            invalidation_fired: invFired && i === 0,
+            outcome: 'error', error: e.message,
+          });
+          return { ok: false, error: e.message };
+        }
+      }));
+    },
   });
 
   return new Promise((resolve) => {

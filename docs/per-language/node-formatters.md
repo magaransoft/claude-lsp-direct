@@ -37,6 +37,8 @@ npm i -g prettier eslint
 | format | `{source, filepath?, options?}` | `{formatted}` |
 | check | `{source, filepath?, options?}` | `{matches}` |
 | format-file | `{filepath}` | `{filepath, formatted, changed}` — resolves config + formats |
+| format-files | `{files: [abs-path...]}` | `{results: [{ok:true,filepath,formatted,changed}|{ok:false,filepath,error}]}` |
+| check-files | `{files: [abs-path...]}` | `{results: [{ok:true,filepath,matches}|{ok:false,filepath,error}]}` |
 | resolve-config | `{filepath}` | `{config}` |
 
 ## `eslint-direct` methods
@@ -48,6 +50,24 @@ npm i -g prettier eslint
 | lint-files | `{patterns: [glob...], engineOptions?}` | `{results}` |
 | fix-text | `{source, filepath?, engineOptions?}` | `{output, changed, results}` |
 | format-results | `{results, formatterName?}` | `{formatted}` — stylish text |
+
+## Multi-call fan-out (`batch-json`)
+
+Both daemons expose `POST /batch` via the harness. Use `batch-json` for mixed-method fan-out:
+
+```bash
+prettier-direct batch-json '[
+  {"method":"format-file","params":{"filepath":"/abs/A.ts"}},
+  {"method":"format-file","params":{"filepath":"/abs/B.ts"}}
+]'
+
+eslint-direct batch-json '[
+  {"method":"lint-files","params":{"patterns":["src/a/**/*.ts"]}},
+  {"method":"lint-files","params":{"patterns":["src/b/**/*.ts"]}}
+]'
+```
+
+Returns `{results:[{ok:true,value}|{ok:false,error}]}` per sub-call so one bad path NEVER poisons siblings. The file-positional `batch <method> <file>...` convenience is NOT exposed — prettier/eslint methods already accept file lists or globs natively (`format-files`, `check-files`, `lint-files`); use those directly when applicable. The `enforce-batch-on-direct-call.py` PreToolUse hook blocks 2nd same-method `call` within 60s — switch to `batch-json` (or to a multi-file method like `format-files`/`lint-files`) instead.
 
 ## Timing
 

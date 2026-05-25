@@ -8,6 +8,9 @@
 
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const {
   stateDir,
   serveHttp,
@@ -16,6 +19,97 @@ const {
   framing,
   jsonRpcClient,
 } = require('./tool-harness.js');
+
+// idle-shutdown TTL — coordinator self-exits after no /lsp or /batch
+// activity for IDLE_SHUTDOWN_MS. /health + /status do NOT count.
+// env LSP_DIRECT_IDLE_MS overrides default; 0 disables; non-finite or
+// negative falls back to default.
+const IDLE_SHUTDOWN_MS = (() => {
+  const raw = process.env.LSP_DIRECT_IDLE_MS;
+  if (raw === undefined || raw === '') return 30 * 60 * 1000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 30 * 60 * 1000;
+  return n;
+})();
+const IDLE_CHECK_MS = 60 * 1000;
+
+// parent-watchdog — coordinator polls parent claude PID; if parent gone
+// (claude crashed without sending SIGTERM), coordinator self-exits after
+// PARENT_WATCHDOG_MS poll. Closes the orphan-coordinator-on-crash gap per
+// orphan-teardown ADR-002. env LSP_DIRECT_PARENT_WATCHDOG_MS overrides
+// default; 0 disables. parent PID captured at startup via process.ppid.
+const PARENT_WATCHDOG_MS = (() => {
+  const raw = process.env.LSP_DIRECT_PARENT_WATCHDOG_MS;
+  if (raw === undefined || raw === '') return 60 * 1000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 60 * 1000;
+  return n;
+})();
+
+// STARTUP_PARENT_PID — captured at module load BEFORE any async adapter
+// init / spawn / adopt work. Fixed for the lifetime of this coordinator.
+// Per codex 2026-05-25 review (orphan-teardown ADR-002 lifecycle gap):
+// capturing process.ppid inside server.listen() callback risks missing the
+// orphan-detection path if the original parent (claude) exits during
+// adapter.adopt() / adapter.spawn() / adapter.init() async chain — by the
+// time the callback runs, ppid would already show as 1 (reparented to init),
+// and the watchdog block `if (parentPid !== 1)` would silently disable
+// itself. Fixing the value at module-load time pins the original parent's
+// PID regardless of subsequent reparenting.
+const STARTUP_PARENT_PID = process.ppid;
+
+// REGISTRY — central per-host lineage TSV. Records every coordinator-spawned
+// backend so a future audit can answer "which workspace owns PID X" without
+// lsof guesswork (closes the vue-tsserver-untraceable diagnostic gap, per
+// orphan-teardown ADR-004). Atomic via O_APPEND single-line writes — POSIX
+// guarantees atomicity for writes <PIPE_BUF (4096 bytes); rows are ~250 bytes.
+// Columns (TSV): spawn_ts | coordinator_pid | backend_pid | wrapper | workspace | parent_pid
+const REGISTRY_PATH = path.join(
+  process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'),
+  'claude-lsp-direct',
+  'registry.tsv',
+);
+
+function registryAppend(coordinatorPid, backendPid, wrapper, workspace, parentPid) {
+  try {
+    fs.mkdirSync(path.dirname(REGISTRY_PATH), { recursive: true });
+    // header on first write
+    if (!fs.existsSync(REGISTRY_PATH)) {
+      const header = 'spawn_ts\tcoordinator_pid\tbackend_pid\twrapper\tworkspace\tparent_pid\n';
+      fs.appendFileSync(REGISTRY_PATH, header, { flag: 'a' });
+    }
+    const row = [
+      new Date().toISOString(),
+      coordinatorPid,
+      backendPid,
+      wrapper,
+      workspace.replace(/\t/g, ' '), // avoid TSV corruption from tab in path (rare)
+      parentPid || '',
+    ].join('\t') + '\n';
+    fs.appendFileSync(REGISTRY_PATH, row, { flag: 'a' });
+  } catch (e) {
+    // best-effort — registry is observability, never block spawn on write failure
+  }
+}
+
+// killGroup — send signal to entire process group, NOT just immediate
+// child PID. Required because LSP backends (pyright, jdtls, metals,
+// tsserver, vue-language-server) spawn their own subprocesses
+// (workers, indexers, plugin hosts); a SIGTERM to the immediate child
+// leaks grandchildren. spawn() with detached:true makes child the group
+// leader (its PID == its PGID); kill(-pid) sends to whole group.
+// Per orphan-teardown ADR-001 (resolves macOS Open Q2: confirmed working
+// — detached:true creates new session via setsid → child is pgid leader).
+// Fallback to direct kill if group-kill fails (ESRCH / EPERM).
+function killGroup(proc, signal) {
+  signal = signal || 'SIGTERM';
+  if (!proc || !proc.pid || proc.killed) return;
+  try {
+    process.kill(-proc.pid, signal);
+  } catch (e) {
+    try { proc.kill(signal); } catch (_) { /* group + direct both failed; nothing to do */ }
+  }
+}
 
 // createProxy({ adapter, workspace, port, toolName })
 //   adapter: see docs/architecture.md § adapter contract
@@ -28,6 +122,8 @@ async function createProxy({ adapter, workspace, port, toolName }) {
   const log = (...args) => console.error(`[${toolName}]`, ...args);
   const logCall = callLog(dir);
   const events = new EventEmitter();
+  let lastActivityTs = Date.now();
+  let inFlight = 0;
 
   // spawn or adopt child processes per adapter. adapter.adopt MAY be
   // async and MAY return null when no adoption target is available —
@@ -58,6 +154,11 @@ async function createProxy({ adapter, workspace, port, toolName }) {
         stdio: ['pipe', 'pipe', 'pipe'],
         cwd: spec.cwd || workspace,
         env: spec.env || process.env,
+        // detached:true on POSIX calls setsid() → child becomes session leader
+        // AND its own process group leader; its PID is the PGID. Required for
+        // killGroup() to reap grandchildren (pyright workers, jdtls indexers,
+        // tsserver plugin hosts, etc.). Per orphan-teardown ADR-001.
+        detached: true,
       });
     }
     proc.stderr.on('data', d => log(`${spec.id}:`, d.toString().trim()));
@@ -80,6 +181,14 @@ async function createProxy({ adapter, workspace, port, toolName }) {
     proc.stdout.on('data', reader);
 
     children[spec.id] = { proc, spec, send: writer };
+
+    // ADR-004 — register backend lineage for orchestrator queries.
+    // Adopted children (spec.proc preset) are NOT registered: we don't own
+    // their lifecycle and the registry's purpose is reap-mapping for owned
+    // backends. Skip when proc.pid is falsy (some adapters return mock procs).
+    if (!adopted && proc && proc.pid) {
+      registryAppend(process.pid, proc.pid, toolName, workspace, process.ppid);
+    }
   }
 
   // pre-build jsonRpcClient helpers for any contentLength child — adapter
@@ -150,8 +259,12 @@ async function createProxy({ adapter, workspace, port, toolName }) {
     },
     async onHard(changed) {
       log('hard invalidation:', changed.join(', '));
-      // wrapper re-starts on next call; clean exit
-      for (const c of Object.values(children)) c.proc.kill();
+      // wrapper re-starts on next call; clean exit.
+      // use killGroup (NOT c.proc.kill) so backend grandchildren in the same
+      // process group are reaped atomically — per codex 2026-05-25 round-2
+      // review on Slice 1: c.proc.kill() only signals direct child, leaks
+      // grandchildren (workers, indexers, bloop) on hard invalidation.
+      for (const c of Object.values(children)) killGroup(c.proc);
       process.exit(2);
     },
   });
@@ -176,25 +289,69 @@ async function createProxy({ adapter, workspace, port, toolName }) {
       };
     },
     async onCall({ method, params }) {
+      lastActivityTs = Date.now();
+      inFlight++;
       const t0 = Date.now();
       invalidationFiredOnLastCall = false;
-      const r = await invalidator.check();
-      if (r.softChanged.length || r.hardChanged.length) invalidationFiredOnLastCall = true;
       try {
-        const result = await adapter.call({ method, params }, ctx);
-        logCall({
-          method, ms: Date.now() - t0, adopted,
-          invalidation_fired: invalidationFiredOnLastCall,
-          outcome: 'ok',
-        });
-        return result;
-      } catch (e) {
-        logCall({
-          method, ms: Date.now() - t0, adopted,
-          invalidation_fired: invalidationFiredOnLastCall,
-          outcome: 'error', error: e.message,
-        });
-        throw e;
+        const r = await invalidator.check();
+        if (r.softChanged.length || r.hardChanged.length) invalidationFiredOnLastCall = true;
+        try {
+          const result = await adapter.call({ method, params }, ctx);
+          logCall({
+            method, ms: Date.now() - t0, adopted,
+            invalidation_fired: invalidationFiredOnLastCall,
+            outcome: 'ok',
+          });
+          return result;
+        } catch (e) {
+          logCall({
+            method, ms: Date.now() - t0, adopted,
+            invalidation_fired: invalidationFiredOnLastCall,
+            outcome: 'error', error: e.message,
+          });
+          throw e;
+        }
+      } finally {
+        inFlight--;
+        lastActivityTs = Date.now();
+      }
+    },
+    // onBatch — fan-out across adapter.call concurrently. invalidator.check
+    // MUST run exactly once at batch entry per plan § decisions-locked. logCall
+    // emits one line per sub-call to preserve confidence_report.py granularity.
+    // Per-sub-call try/catch isolates failures so one bad call NEVER poisons
+    // siblings — return shape per call: {ok:true,value} | {ok:false,error}.
+    async onBatch({ calls }) {
+      lastActivityTs = Date.now();
+      inFlight++;
+      try {
+        invalidationFiredOnLastCall = false;
+        const r = await invalidator.check();
+        if (r.softChanged.length || r.hardChanged.length) invalidationFiredOnLastCall = true;
+        const invFired = invalidationFiredOnLastCall;
+        return await Promise.all(calls.map(async ({ method, params }, i) => {
+          const subT0 = Date.now();
+          try {
+            const value = await adapter.call({ method, params: params || {} }, ctx);
+            logCall({
+              method, ms: Date.now() - subT0, adopted,
+              invalidation_fired: invFired && i === 0,
+              outcome: 'ok',
+            });
+            return { ok: true, value };
+          } catch (e) {
+            logCall({
+              method, ms: Date.now() - subT0, adopted,
+              invalidation_fired: invFired && i === 0,
+              outcome: 'error', error: e.message,
+            });
+            return { ok: false, error: e.message };
+          }
+        }));
+      } finally {
+        inFlight--;
+        lastActivityTs = Date.now();
       }
     },
   });
@@ -203,18 +360,62 @@ async function createProxy({ adapter, workspace, port, toolName }) {
     server.listen(() => {
       const actual = server.address().port;
       log(`listening on 127.0.0.1:${actual} workspace=${workspace} adopted=${adopted}`);
-      const sigHandler = () => {
-        for (const c of Object.values(children)) c.proc.kill();
-        process.exit(0);
+      log(`idle-shutdown: ${IDLE_SHUTDOWN_MS === 0 ? 'disabled' : Math.round(IDLE_SHUTDOWN_MS/1000) + 's'}`);
+      // idle-shutdown timer — Layer A leak prevention. unref() so timer
+      // alone does NOT keep the event loop alive (child procs + http
+      // server already do).
+      let idleTimer = null;
+      let parentWatchdog = null;
+      // pin parent PID from module-load time (STARTUP_PARENT_PID), NOT process.ppid
+      // here — by this point adapter.adopt + spawn + init have already run async,
+      // and the original parent may have already exited (ppid reparented to 1).
+      const parentPid = STARTUP_PARENT_PID;
+      const clearTimers = () => {
+        if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
+        if (parentWatchdog) { clearInterval(parentWatchdog); parentWatchdog = null; }
       };
+      const shutdown = (reason, exitCode) => {
+        log(reason);
+        clearTimers();
+        for (const c of Object.values(children)) killGroup(c.proc);
+        try { server.close(); } catch (_) { /* already closing */ }
+        process.exit(exitCode === undefined ? 0 : exitCode);
+      };
+      if (IDLE_SHUTDOWN_MS > 0) {
+        idleTimer = setInterval(() => {
+          if (inFlight === 0 && Date.now() - lastActivityTs > IDLE_SHUTDOWN_MS) {
+            shutdown(`idle-shutdown: no activity for ${Math.round((Date.now() - lastActivityTs)/1000)}s — exiting`, 0);
+          }
+        }, IDLE_CHECK_MS);
+        idleTimer.unref();
+      }
+      // parent-watchdog — exit if claude crashed without sending SIGTERM.
+      // Skip when parentPid is 1 (already orphaned to init at spawn time —
+      // expected for nohup-spawned coordinators where the launcher detached
+      // intentionally; in that case the wrapper itself, not claude, owns lifecycle).
+      if (PARENT_WATCHDOG_MS > 0 && parentPid && parentPid !== 1) {
+        log(`parent-watchdog: poll ppid=${parentPid} every ${Math.round(PARENT_WATCHDOG_MS/1000)}s`);
+        parentWatchdog = setInterval(() => {
+          try {
+            process.kill(parentPid, 0); // signal 0 = liveness probe, no actual signal sent
+          } catch (e) {
+            if (e.code === 'ESRCH') {
+              shutdown(`parent-watchdog: parent PID ${parentPid} gone — shutting down`, 0);
+            }
+            // EPERM is rare for own ancestors; if it happens, parent is alive
+            // but not signalable — treat as alive (don't shut down on EPERM)
+          }
+        }, PARENT_WATCHDOG_MS);
+        parentWatchdog.unref();
+      }
+      const sigHandler = () => shutdown(`signal received — shutting down`, 0);
       process.on('SIGTERM', sigHandler);
       process.on('SIGINT', sigHandler);
       resolve({
         address: server.address(),
         close: (cb) => {
-          for (const c of Object.values(children)) {
-            try { c.proc.kill(); } catch {}
-          }
+          clearTimers();
+          for (const c of Object.values(children)) killGroup(c.proc);
           server.close(cb);
         },
         on: events.on.bind(events),

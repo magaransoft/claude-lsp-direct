@@ -10,6 +10,18 @@ LSP_ARGS=(--stdio)
 LANG_ID="typescript"
 WORKSPACE_MARKERS=(tsconfig.json package.json)
 
+# shared cap-check helper — Layer B leak prevention
+# portable symlink-resolving source (readlink -f is GNU-only)
+__cap_src="${BASH_SOURCE[0]}"
+while [ -L "$__cap_src" ]; do
+  __cap_dir="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+  __cap_src="$(readlink "$__cap_src")"
+  case "$__cap_src" in /*) ;; *) __cap_src="$__cap_dir/$__cap_src" ;; esac
+done
+__CAP_BIN_DIR="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+# shellcheck source=./lib/cap-check.sh
+. "$__CAP_BIN_DIR/lib/cap-check.sh"
+
 die() { echo "ts-direct: $*" >&2; exit 1; }
 
 resolve_workspace() {
@@ -59,6 +71,7 @@ cmd_start() {
     return 0
   fi
   port="$(free_port)"
+  cap_check_and_evict "ts-direct" "$STATE_ROOT"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
   nohup node "$PROXY" --tool-name ts-direct --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${LSP_ARGS[@]}" >"$dir/log" 2>&1 &
@@ -91,10 +104,62 @@ cmd_call() {
   echo
 }
 
+cmd_batch() {
+  local method="${1:-}"; shift || true
+  [ -z "$method" ] && die "usage: ts-direct batch <method> <file>... — each <file> becomes {textDocument:{uri:'file://<abs>'}}; non-textDocument shapes MUST use batch-json"
+  [ "$#" -eq 0 ] && die "batch requires >=1 file path"
+  local files=()
+  local f abs dir base
+  for f in "$@"; do
+    case "$f" in
+      /*) abs="$f" ;;
+      *)
+        dir="$(cd "$(dirname -- "$f")" 2>/dev/null && pwd)" || die "cannot resolve directory of $f"
+        base="$(basename -- "$f")"
+        abs="$dir/$base"
+        ;;
+    esac
+    files+=("$abs")
+  done
+  # workspace derived from first file's dir (walk-up via resolve_workspace);
+  # all files MUST share one workspace per plan § decisions-locked
+  local first_dir ws state port calls_json payload
+  first_dir="$(dirname -- "${files[0]}")"
+  ws="$(resolve_workspace "$first_dir")"
+  state="$(state_dir "$ws")"
+  server_alive "$state" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$state" port)"
+  calls_json="$(printf '%s\n' "${files[@]}" | jq -R -s -c --arg m "$method" '
+    split("\n") | map(select(length>0)) | map({method: $m, params: {textDocument: {uri: ("file://" + .)}}})
+  ')"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch failed (method=$method) — verify daemon health via '$0 status'"
+  echo
+}
+
+cmd_batch_json() {
+  local calls_json="${1-}"; shift || true
+  [ -z "$calls_json" ] && die "usage: ts-direct batch-json '<json-array of {method,params}>' [workspace]"
+  local ws state port payload
+  ws="$(resolve_workspace "${1:-}")"
+  state="$(state_dir "$ws")"
+  server_alive "$state" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$state" port)"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch-json failed — verify daemon health via '$0 status'"
+  echo
+}
+
 cmd_tools() {
   cat <<EOF
 ts-direct exposes raw LSP methods (typescript-language-server surface).
-invoke: ts-direct call <method> '<json-params>' [workspace]
+invoke single: ts-direct call <method> '<json-params>' [workspace]
+invoke batch:  ts-direct batch <method> <file>... [files...]
+               ts-direct batch-json '<json-array>' [workspace]
 
 common methods:
   textDocument/documentSymbol       outline of a .ts file
@@ -112,8 +177,12 @@ common methods:
 
 params MUST include textDocument.uri as file://<abs-path> for textDocument/* methods.
 
-example:
+examples:
   ts-direct call textDocument/documentSymbol '{"textDocument":{"uri":"file:///path/to/file.ts"}}'
+  ts-direct batch textDocument/documentSymbol /abs/a.ts /abs/b.ts /abs/c.ts
+  ts-direct batch-json '[{"method":"workspace/symbol","params":{"query":"Foo"}},{"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///abs/x.ts"},"position":{"line":0,"character":0}}}]'
+
+batch return shape: {results:[{ok:true,value}|{ok:false,error}]} per sub-call — one bad uri NEVER poisons siblings.
 EOF
 }
 
@@ -166,23 +235,27 @@ cmd_prune() {
 }
 
 case "${1:-}" in
-  start)  shift; cmd_start "$@" ;;
-  call)   shift; cmd_call "$@" ;;
-  tools)  shift; cmd_tools "$@" ;;
-  stop)   shift; cmd_stop "$@" ;;
-  status) shift; cmd_status "$@" ;;
-  prune)  shift; cmd_prune "$@" ;;
+  start)      shift; cmd_start "$@" ;;
+  call)       shift; cmd_call "$@" ;;
+  batch)      shift; cmd_batch "$@" ;;
+  batch-json) shift; cmd_batch_json "$@" ;;
+  tools)      shift; cmd_tools "$@" ;;
+  stop)       shift; cmd_stop "$@" ;;
+  status)     shift; cmd_status "$@" ;;
+  prune)      shift; cmd_prune "$@" ;;
   ""|-h|--help)
     cat <<EOF
 ts-direct — proxy typescript-language-server over persistent HTTP; one server per workspace
 
 usage:
-  ts-direct start [workspace]                 spawn proxy for workspace (default: cwd walking up for tsconfig/package.json)
-  ts-direct call <method> '<json-params>' [ws]  issue raw LSP method — auto-starts server
-  ts-direct tools                             list LSP method surface
-  ts-direct stop [workspace]                  kill server for workspace
-  ts-direct status                            show all tracked servers
-  ts-direct prune                            remove state dirs for dead servers
+  ts-direct start [workspace]                              spawn proxy for workspace (default: cwd walking up for tsconfig/package.json)
+  ts-direct call <method> '<json-params>' [ws]             issue raw LSP method — auto-starts server
+  ts-direct batch <method> <file>... [files...]            multi-file LSP fan-out — builds {textDocument:{uri:'file://<abs>'}} per file
+  ts-direct batch-json '<json-array>' [ws]                 raw multi-call passthrough — array of {method,params}
+  ts-direct tools                                          list LSP method surface
+  ts-direct stop [workspace]                               kill server for workspace
+  ts-direct status                                         show all tracked servers
+  ts-direct prune                                          remove state dirs for dead servers
 
 workspace markers (walk-up order): ${WORKSPACE_MARKERS[*]}
 

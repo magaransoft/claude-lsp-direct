@@ -1,0 +1,6 @@
+wrapper	workspace	cold_ms_p50	cold_ms_p99	n	timestamp
+py-direct	/Users/blanquitoh/projects/claude-lsp-direct/fixtures/python	1213	1221	2	2026-05-25T14:24:26Z
+ts-direct	/Users/blanquitoh/projects/claude-lsp-direct/fixtures/typescript	1319	1324	2	2026-05-25T14:24:31Z
+java-direct	/Users/blanquitoh/projects/claude-lsp-direct/fixtures/java	4229	4252	2	2026-05-25T14:24:42Z
+cs-direct	/Users/blanquitoh/projects/claude-lsp-direct/fixtures/csharp	2440	2441	2	2026-05-25T14:24:49Z
+vue-direct	/Users/blanquitoh/projects/claude-lsp-direct/fixtures/vue	1170	1178	2	2026-05-25T14:24:54Z

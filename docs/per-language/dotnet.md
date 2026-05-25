@@ -28,7 +28,16 @@ dotnet-direct call test    '{"filter":"Category=Unit"}'
 dotnet-direct call restore '{}'
 dotnet-direct call command '{"args":["tool","list"]}'    # escape hatch
 dotnet-direct tools                                      # full surface
+
+# multi-verb fan-out (1 HTTP roundtrip + 1 tool_result)
+dotnet-direct batch-json '[
+  {"method":"restore","params":{}},
+  {"method":"build","params":{"configuration":"Release"}},
+  {"method":"test","params":{"filter":"Category=Unit"}}
+]'
 ```
+
+dotnet verbs are project-grain (no per-file batch convenience). Use `batch-json` for multi-verb fan-out — `enforce-batch-on-direct-call.py` PreToolUse hook blocks 2nd same-method `call` within 60s. Per-verb envelope `{ok:true,value}|{ok:false,error}` so one failed verb NEVER poisons siblings. Sub-calls run concurrently against the dotnet build-server; ordering matters when one verb depends on another (e.g. `restore → build → test`) — issue dependent verbs as a sequence of separate `call` invocations rather than a batch.
 
 ## Method surface
 

@@ -1,4 +1,4 @@
-# Scala — `metals-direct`
+# Scala — `scala-direct`
 
 The odd one out: proxies `metals-mcp` (Scalameta's MCP server for Metals) over HTTP rather than LSP directly. Exposes 17 semantic tools as opposed to raw LSP methods.
 
@@ -28,13 +28,13 @@ Run `sbt bloopInstall` once per project.
 
 ## Invocation
 ```bash
-metals-direct start                                              # cwd walk-up
-metals-direct call list-modules '{}'
-metals-direct call get-usages '{"fqcn":"com.example.Service.method","module":"core"}'
-metals-direct call get-source '{"fqcn":"com.example.Service"}'
-metals-direct call inspect '{"fqcn":"com.example.Service","module":"core"}'
-metals-direct call glob-search '{"query":"UserService","fileInFocus":"/abs/path/to/any.scala"}'
-metals-direct tools                                              # full list
+scala-direct start                                              # cwd walk-up
+scala-direct call list-modules '{}'
+scala-direct call get-usages '{"fqcn":"com.example.Service.method","module":"core"}'
+scala-direct call get-source '{"fqcn":"com.example.Service"}'
+scala-direct call inspect '{"fqcn":"com.example.Service","module":"core"}'
+scala-direct call glob-search '{"query":"UserService","fileInFocus":"/abs/path/to/any.scala"}'
+scala-direct tools                                              # full list
 ```
 
 ## Op surface (17 tools, not LSP methods)
@@ -62,8 +62,8 @@ Formatting + refactoring:
 - `list-scalafix-rules`, `run-scalafix-rule`, `generate-scalafix-rule`
 
 ## Quirks
-- **Cold `.bloop/` import:** first `metals-direct start` on a fresh checkout takes 30-120s while Bloop imports the build. Subsequent calls are ~30ms.
-- **External server adoption:** if `<workspace>/.metals/mcp.json` already exists (IDE or prior session spawned a metals-mcp), `metals-direct` adopts that server instead of spawning a new one. `metals-direct stop` unregisters but doesn't kill the external process.
+- **Cold `.bloop/` import:** first `scala-direct start` on a fresh checkout takes 30-120s while Bloop imports the build. Subsequent calls are ~30ms.
+- **External server adoption:** if `<workspace>/.metals/mcp.json` already exists (IDE or prior session spawned a metals-mcp), `scala-direct` adopts that server instead of spawning a new one. `scala-direct stop` unregisters but doesn't kill the external process.
 - **`fileInFocus` required for some tools:** `glob-search`, `typed-glob-search`, `compile-file`, `format-file`, `get-usages` need an absolute path to any file in the target module. Without it, errors "Missing fileInFocus and failed to infer it".
 - **FQCN discovery:** tools that take `fqcn` require the exact fully-qualified name. Don't guess — look at the package line at the top of the source file first.
 
@@ -73,4 +73,4 @@ Formatting + refactoring:
 - Warm: ~30ms per call
 
 ## State directory
-`~/.cache/metals-direct/<workspace-hash>/{pid,port,workspace,session,log}`
+`~/.cache/scala-direct/<workspace-hash>/{pid,port,workspace,session,log}`

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# py-direct — proxy pyright-langserver over persistent HTTP; per-workspace isolation; LSP-workaround convention per rules/lsp.md
+# go-direct — proxy gopls over persistent HTTP; per-workspace isolation; LSP-workaround convention per rules/lsp.md
 # subcommands: start [workspace] | call <method> <json-params> [workspace] | stop [workspace] | status | tools [workspace]
 set -euo pipefail
 
-STATE_ROOT="${PY_DIRECT_STATE:-$HOME/.cache/py-direct}"
+STATE_ROOT="${GO_DIRECT_STATE:-$HOME/.cache/go-direct}"
 PROXY="$HOME/.claude/bin/lsp-stdio-proxy.js"
-LSP_BIN="pyright-langserver"
-LSP_ARGS=(--stdio)
-LANG_ID="python"
-WORKSPACE_MARKERS=(pyrightconfig.json pyproject.toml setup.cfg setup.py)
+LSP_BIN="gopls"
+LSP_ARGS=()
+LANG_ID="go"
+WORKSPACE_MARKERS=(go.work go.mod)
 
 # shared cap-check helper — Layer B leak prevention
 # portable symlink-resolving source (readlink -f is GNU-only)
@@ -22,7 +22,7 @@ __CAP_BIN_DIR="$(cd -P "$(dirname "$__cap_src")" && pwd)"
 # shellcheck source=./lib/cap-check.sh
 . "$__CAP_BIN_DIR/lib/cap-check.sh"
 
-die() { echo "py-direct: $*" >&2; exit 1; }
+die() { echo "go-direct: $*" >&2; exit 1; }
 
 resolve_workspace() {
   local ws="${1:-}"
@@ -60,7 +60,7 @@ server_alive() {
 }
 
 cmd_start() {
-  command -v "$LSP_BIN" >/dev/null || die "$LSP_BIN not on PATH — install pyright globally (npm i -g pyright) or ensure claude plugin binary is resolvable"
+  command -v "$LSP_BIN" >/dev/null || die "$LSP_BIN not on PATH — install via 'go install golang.org/x/tools/gopls@latest' and ensure \$(go env GOPATH)/bin is on PATH"
   [ -f "$PROXY" ] || die "proxy missing: $PROXY"
   local ws dir port pid
   ws="$(resolve_workspace "${1:-}")"
@@ -71,10 +71,10 @@ cmd_start() {
     return 0
   fi
   port="$(free_port)"
-  cap_check_and_evict "py-direct" "$STATE_ROOT"
+  cap_check_and_evict "go-direct" "$STATE_ROOT"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$PROXY" --tool-name py-direct --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${LSP_ARGS[@]}" >"$dir/log" 2>&1 &
+  nohup node "$PROXY" --tool-name go-direct --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${LSP_ARGS[@]+"${LSP_ARGS[@]}"}" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   local i=0
@@ -90,7 +90,7 @@ cmd_call() {
   local method="${1:-}"; shift || true
   local params_json="${1-}"; shift || true
   [ -z "$params_json" ] && params_json='{}'
-  [ -z "$method" ] && die "usage: py-direct call <method> '<json-params>' [workspace]"
+  [ -z "$method" ] && die "usage: go-direct call <method> '<json-params>' [workspace]"
   local ws dir port
   ws="$(resolve_workspace "${1:-}")"
   dir="$(state_dir "$ws")"
@@ -106,7 +106,7 @@ cmd_call() {
 
 cmd_batch() {
   local method="${1:-}"; shift || true
-  [ -z "$method" ] && die "usage: py-direct batch <method> <file>... — each <file> becomes {textDocument:{uri:'file://<abs>'}}; non-textDocument shapes MUST use batch-json"
+  [ -z "$method" ] && die "usage: go-direct batch <method> <file>... — each <file> becomes {textDocument:{uri:'file://<abs>'}}; non-textDocument shapes MUST use batch-json"
   [ "$#" -eq 0 ] && die "batch requires >=1 file path"
   local files=()
   local f abs dir base
@@ -139,7 +139,7 @@ cmd_batch() {
 
 cmd_batch_json() {
   local calls_json="${1-}"; shift || true
-  [ -z "$calls_json" ] && die "usage: py-direct batch-json '<json-array of {method,params}>' [workspace]"
+  [ -z "$calls_json" ] && die "usage: go-direct batch-json '<json-array of {method,params}>' [workspace]"
   local ws state port payload
   ws="$(resolve_workspace "${1:-}")"
   state="$(state_dir "$ws")"
@@ -154,31 +154,31 @@ cmd_batch_json() {
 
 cmd_tools() {
   cat <<EOF
-py-direct exposes raw LSP methods (pyright-langserver surface).
-invoke single: py-direct call <method> '<json-params>' [workspace]
-invoke batch:  py-direct batch <method> <file>... [files...]
-               py-direct batch-json '<json-array>' [workspace]
+go-direct exposes raw LSP methods (gopls surface).
+invoke single: go-direct call <method> '<json-params>' [workspace]
+invoke batch:  go-direct batch <method> <file>... [files...]
+               go-direct batch-json '<json-array>' [workspace]
 
 common methods:
-  textDocument/documentSymbol       outline of a .py file
-  textDocument/hover                type + docstring at position
+  textDocument/documentSymbol       outline of a .go file
+  textDocument/hover                type + godoc at position
   textDocument/definition           jump to definition
   textDocument/references           find references
   textDocument/typeDefinition       jump to type
-  textDocument/implementation       find implementations
+  textDocument/implementation       find implementations of an interface
   textDocument/completion           completions at position
   textDocument/signatureHelp        call signature
   textDocument/prepareCallHierarchy get call-hierarchy handle
   callHierarchy/incomingCalls       callers
   callHierarchy/outgoingCalls       callees
-  workspace/symbol                  fuzzy search across workspace
+  workspace/symbol                  fuzzy search across module + transitive deps
 
 params MUST include textDocument.uri as file://<abs-path> for textDocument/* methods.
 
 examples:
-  py-direct call textDocument/documentSymbol '{"textDocument":{"uri":"file:///path/to/file.py"}}'
-  py-direct batch textDocument/documentSymbol /abs/a.py /abs/b.py /abs/c.py
-  py-direct batch-json '[{"method":"workspace/symbol","params":{"query":"Foo"}},{"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///abs/x.py"},"position":{"line":0,"character":0}}}]'
+  go-direct call textDocument/documentSymbol '{"textDocument":{"uri":"file:///path/to/file.go"}}'
+  go-direct batch textDocument/documentSymbol /abs/a.go /abs/b.go /abs/c.go
+  go-direct batch-json '[{"method":"workspace/symbol","params":{"query":"Tracker"}},{"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///abs/x.go"},"position":{"line":0,"character":0}}}]'
 
 batch return shape: {results:[{ok:true,value}|{ok:false,error}]} per sub-call — one bad uri NEVER poisons siblings.
 EOF
@@ -243,21 +243,23 @@ case "${1:-}" in
   prune)      shift; cmd_prune "$@" ;;
   ""|-h|--help)
     cat <<EOF
-py-direct — proxy pyright-langserver over persistent HTTP; one server per workspace
+go-direct — proxy gopls over persistent HTTP; one server per workspace
 
 usage:
-  py-direct start [workspace]                              spawn proxy for workspace (default: cwd walking up for pyrightconfig/pyproject/setup)
-  py-direct call <method> '<json-params>' [ws]             issue raw LSP method — auto-starts server
-  py-direct batch <method> <file>... [files...]            multi-file LSP fan-out — builds {textDocument:{uri:'file://<abs>'}} per file
-  py-direct batch-json '<json-array>' [ws]                 raw multi-call passthrough — array of {method,params}
-  py-direct tools                                          list LSP method surface
-  py-direct stop [workspace]                               kill server for workspace
-  py-direct status                                         show all tracked servers
-  py-direct prune                                          remove state dirs for dead servers
+  go-direct start [workspace]                              spawn proxy for workspace (default: cwd walking up for go.work/go.mod)
+  go-direct call <method> '<json-params>' [ws]             issue raw LSP method — auto-starts server
+  go-direct batch <method> <file>... [files...]            multi-file LSP fan-out — builds {textDocument:{uri:'file://<abs>'}} per file
+  go-direct batch-json '<json-array>' [ws]                 raw multi-call passthrough — array of {method,params}
+  go-direct tools                                          list LSP method surface
+  go-direct stop [workspace]                               kill server for workspace
+  go-direct status                                         show all tracked servers
+  go-direct prune                                          remove state dirs for dead servers
 
 workspace markers (walk-up order): ${WORKSPACE_MARKERS[*]}
 
 state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log}
+
+install: go install golang.org/x/tools/gopls@latest  (ensure \$(go env GOPATH)/bin on PATH)
 EOF
     ;;
   *) die "unknown subcommand: $1 (try --help)" ;;

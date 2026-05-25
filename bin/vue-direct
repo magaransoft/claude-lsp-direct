@@ -7,6 +7,18 @@ set -euo pipefail
 STATE_ROOT="${VUE_DIRECT_STATE:-$HOME/.cache/vue-direct}"
 COORDINATOR="$HOME/.claude/bin/vue-direct-coordinator.js"
 
+# shared cap-check helper — Layer B leak prevention
+# portable symlink-resolving source (readlink -f is GNU-only)
+__cap_src="${BASH_SOURCE[0]}"
+while [ -L "$__cap_src" ]; do
+  __cap_dir="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+  __cap_src="$(readlink "$__cap_src")"
+  case "$__cap_src" in /*) ;; *) __cap_src="$__cap_dir/$__cap_src" ;; esac
+done
+__CAP_BIN_DIR="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+# shellcheck source=./lib/cap-check.sh
+. "$__CAP_BIN_DIR/lib/cap-check.sh"
+
 die() { echo "vue-direct: $*" >&2; exit 1; }
 
 # resolve workspace: arg > walk up for package.json > cwd
@@ -68,6 +80,7 @@ cmd_start() {
     return 0
   fi
   port="$(free_port)"
+  cap_check_and_evict "vue-direct" "$STATE_ROOT"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
   nohup node "$COORDINATOR" --tool-name vue-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
@@ -101,9 +114,60 @@ cmd_call() {
   echo
 }
 
+cmd_batch() {
+  local method="${1:-}"; shift || true
+  [ -z "$method" ] && die "usage: vue-direct batch <method> <file>... — each <file> becomes {textDocument:{uri:'file://<abs>'}}; non-textDocument shapes MUST use batch-json"
+  [ "$#" -eq 0 ] && die "batch requires >=1 file path"
+  local files=()
+  local f abs dir base
+  for f in "$@"; do
+    case "$f" in
+      /*) abs="$f" ;;
+      *)
+        dir="$(cd "$(dirname -- "$f")" 2>/dev/null && pwd)" || die "cannot resolve directory of $f"
+        base="$(basename -- "$f")"
+        abs="$dir/$base"
+        ;;
+    esac
+    files+=("$abs")
+  done
+  local first_dir ws state port calls_json payload
+  first_dir="$(dirname -- "${files[0]}")"
+  ws="$(resolve_workspace "$first_dir")"
+  state="$(state_dir "$ws")"
+  server_alive "$state" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$state" port)"
+  calls_json="$(printf '%s\n' "${files[@]}" | jq -R -s -c --arg m "$method" '
+    split("\n") | map(select(length>0)) | map({method: $m, params: {textDocument: {uri: ("file://" + .)}}})
+  ')"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch failed (method=$method) — verify daemon health via '$0 status'"
+  echo
+}
+
+cmd_batch_json() {
+  local calls_json="${1-}"; shift || true
+  [ -z "$calls_json" ] && die "usage: vue-direct batch-json '<json-array of {method,params}>' [workspace]"
+  local ws state port payload
+  ws="$(resolve_workspace "${1:-}")"
+  state="$(state_dir "$ws")"
+  server_alive "$state" || { echo "server not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$state" port)"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch-json failed — verify daemon health via '$0 status'"
+  echo
+}
+
 cmd_tools() {
   cat <<EOF
-vue-direct exposes raw LSP methods — send via: vue-direct call <method> '<json-params>' [workspace]
+vue-direct exposes raw LSP methods (Vue LS v3 + tsserver bridge surface).
+invoke single: vue-direct call <method> '<json-params>' [workspace]
+invoke batch:  vue-direct batch <method> <file>... [files...]
+               vue-direct batch-json '<json-array>' [workspace]
 
 common methods (LSP 3.17 subset the Vue LS implements):
   textDocument/documentSymbol       outline of a .vue file
@@ -123,8 +187,12 @@ common methods (LSP 3.17 subset the Vue LS implements):
 
 all methods accept params per LSP spec. params MUST include textDocument.uri as file://<abs-path> for textDocument/* methods.
 
-example:
+examples:
   vue-direct call textDocument/documentSymbol '{"textDocument":{"uri":"file:///path/to/File.vue"}}'
+  vue-direct batch textDocument/documentSymbol /abs/A.vue /abs/B.vue /abs/C.vue
+  vue-direct batch-json '[{"method":"workspace/symbol","params":{"query":"Foo"}}]'
+
+batch return shape: {results:[{ok:true,value}|{ok:false,error}]} per sub-call — one bad uri NEVER poisons siblings.
 EOF
 }
 
@@ -177,27 +245,32 @@ cmd_prune() {
 }
 
 case "${1:-}" in
-  start)  shift; cmd_start "$@" ;;
-  call)   shift; cmd_call "$@" ;;
-  tools)  shift; cmd_tools "$@" ;;
-  stop)   shift; cmd_stop "$@" ;;
-  status) shift; cmd_status "$@" ;;
-  prune)  shift; cmd_prune "$@" ;;
+  start)      shift; cmd_start "$@" ;;
+  call)       shift; cmd_call "$@" ;;
+  batch)      shift; cmd_batch "$@" ;;
+  batch-json) shift; cmd_batch_json "$@" ;;
+  tools)      shift; cmd_tools "$@" ;;
+  stop)       shift; cmd_stop "$@" ;;
+  status)     shift; cmd_status "$@" ;;
+  prune)      shift; cmd_prune "$@" ;;
   ""|-h|--help)
     cat <<EOF
 vue-direct — bridge @vue/language-server to raw tsserver w/ @vue/typescript-plugin over persistent HTTP
 
 usage:
-  vue-direct start [workspace]                 spawn coordinator for workspace (default: cwd walking up for package.json)
-  vue-direct call <method> '<json-params>' [ws]  issue raw LSP method — auto-starts server if needed
-  vue-direct tools                             list LSP method surface
-  vue-direct stop [workspace]                  kill server for workspace
-  vue-direct status                            show all tracked servers
-  vue-direct prune                            remove state dirs for dead servers
+  vue-direct start [workspace]                              spawn coordinator for workspace (default: cwd walking up for package.json)
+  vue-direct call <method> '<json-params>' [ws]             issue raw LSP method — auto-starts server if needed
+  vue-direct batch <method> <file>... [files...]            multi-file LSP fan-out — builds {textDocument:{uri:'file://<abs>'}} per file
+  vue-direct batch-json '<json-array>' [ws]                 raw multi-call passthrough — array of {method,params}
+  vue-direct tools                                          list LSP method surface
+  vue-direct stop [workspace]                               kill server for workspace
+  vue-direct status                                         show all tracked servers
+  vue-direct prune                                          remove state dirs for dead servers
 
 examples:
   cd ~/projects/your-vue-app && vue-direct start
   vue-direct call textDocument/documentSymbol '{"textDocument":{"uri":"file:///path/to/File.vue"}}'
+  vue-direct batch textDocument/documentSymbol /abs/A.vue /abs/B.vue /abs/C.vue
   vue-direct call textDocument/hover '{"textDocument":{"uri":"file:///path/to/File.vue"},"position":{"line":10,"character":5}}'
 
 state: $STATE_ROOT/<workspace-hash>/{pid,port,workspace,log}

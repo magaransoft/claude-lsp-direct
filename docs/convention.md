@@ -7,7 +7,7 @@ Each supported language has a bash wrapper in `bin/` that proxies its LSP over p
 
 | language | wrapper | backend | workspace markers |
 |---|---|---|---|
-| scala | `metals-direct` | metals-mcp | `build.sbt` > `build.sc` > `build.mill` |
+| scala | `scala-direct` | metals-mcp | `build.sbt` > `build.sc` > `build.mill` |
 | vue | `vue-direct` | Vue Language Server v3 + tsserver w/ `@vue/typescript-plugin` | `package.json` |
 | python | `py-direct` | pyright-langserver | `pyrightconfig.json` > `pyproject.toml` > `setup.cfg` > `setup.py` |
 | typescript | `ts-direct` | typescript-language-server | `tsconfig.json` > `package.json` |
@@ -55,7 +55,7 @@ All wrappers expose the same subcommands:
 Raw LSP method names, unmodified from the underlying server. No custom abstraction:
 `textDocument/documentSymbol`, `textDocument/hover`, `textDocument/definition`, `textDocument/references`, `textDocument/implementation`, `textDocument/typeDefinition`, `textDocument/completion`, `textDocument/signatureHelp`, `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`, `workspace/symbol`
 
-Exception: `metals-direct` exposes 17 `metals-mcp` tools (`list-modules`, `inspect`, `get-docs`, `glob-search`, etc.) because the backend is not pure LSP.
+Exception: `scala-direct` exposes 17 `metals-mcp` tools (`list-modules`, `inspect`, `get-docs`, `glob-search`, etc.) because the backend is not pure LSP.
 
 ### Transport
 HTTP over dynamic loopback port. Per-workspace state lives in:

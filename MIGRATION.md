@@ -1,5 +1,55 @@
 # Migration notes
 
+## orphan-teardown unified fix (2026-05-25) — additive, no required action
+
+ADR-001 + ADR-002 land defensive changes (process-group spawn + parent-PID watchdog) for `tool-server-proxy.js` + `scala-direct`. All changes preserve previous behavior on the happy path. Two new env vars are added with safe defaults — users do NOT need to migrate state or update invocations.
+
+Behavioral deltas worth knowing:
+- `tool-server-proxy.js` now spawns LSP backends with `detached:true` → backend is its own process-group leader (pgid == pid). Shutdown paths (idle, sigHandler, close, hard-invalidation) use `kill(-pid, signal)` (group-kill) instead of `proc.kill()` (direct-kill). Closes the "grandchild orphan" pattern (pyright workers, jdtls indexers, tsserver plugin hosts, bloop daemons).
+- coordinator polls `process.kill(parentPid, 0)` every `LSP_DIRECT_PARENT_WATCHDOG_MS` (default 60s); on ESRCH the coordinator shuts down — closes the "claude crashed without SIGTERM" orphan path. Set `LSP_DIRECT_PARENT_WATCHDOG_MS=0` to disable if you spawn coordinators independent of claude.
+- `scala-direct`'s `cmd_start` now spawns metals-mcp via `bin/lib/spawn-detached.py` (setsid+exec) so metals + bloop are in the same process group. `cmd_stop` group-kills with 3s grace + SIGKILL escalation. No state-format change.
+- Central registry `~/.cache/claude-lsp-direct/registry.tsv` is appended on every coordinator-spawned backend AND every metals-mcp spawn. Query via new `lsp-direct-ps` CLI (see README § Operational tools).
+- `~/.claude/hooks/reap-stale-lsp-on-stop.py` (companion change, NOT in this repo) defers the 60-min stale sweep when other claude sessions are alive. Set `LSP_REAP_SKIP_SESSION_CHECK=1` to force the sweep regardless.
+
+If you run `scripts/install.sh` again, new files (`bin/lsp-direct-ps`, `bin/lib/spawn-detached.py`) get symlinked. Re-run is idempotent.
+
+## scala-direct rename (2026-05-20) — BREAKING
+
+`bin/metals-direct` renamed to `bin/scala-direct` for naming consistency
+with `py-direct` / `ts-direct` / `cs-direct` / `java-direct` / `go-direct` /
+`vue-direct`. The upstream name `metals-direct` (after the Metals LSP
+server) was the outlier in this repo's `<language>-direct` pattern.
+
+Hard cut — no backward-compat shim retained:
+
+- old binary symlink removed; `~/.claude/bin/metals-direct` exits 127
+- `METALS_DIRECT_STATE` env var no longer honored — set `SCALA_DIRECT_STATE`
+- legacy state dir `~/.cache/metals-direct/` no longer read; move state
+  to `~/.cache/scala-direct/` via the migration script below
+
+### Required migration
+
+A one-shot idempotent script ships in this repo as `bin/scala-direct-state-migrate.sh`:
+
+```bash
+~/.claude/bin/scala-direct-state-migrate.sh
+```
+
+The script stops any daemons in the legacy state dir (SIGTERM, 10s wait,
+SIGKILL fallback), then atomically moves `~/.cache/metals-direct` →
+`~/.cache/scala-direct`. Safe to run multiple times (no-op on second
+invocation). Exits 0 on success, 1 if any daemon refused to die.
+
+After migration, update any scripts referencing the old wrapper:
+
+```bash
+grep -rln metals-direct your-project/ | xargs sed -i '' 's/metals-direct/scala-direct/g'
+```
+
+The upstream attribution to [@NovaMage](https://github.com/NovaMage)'s
+`agents-metals-direct-lsp` stays verbatim in the README — the rename is
+this repo's local naming consistency, not a fork of upstream's identity.
+
 ## 1.2.0 — tool-harness refactor (coordinator internals)
 
 This release restructures the coordinator internals behind the same
@@ -100,7 +150,7 @@ Post-1.2.0 polish that doesn't change the headline contract:
 - `docs/per-language/dotnet.md` — added § "Network-sandbox interaction"
   describing the NuGet-restore-under-sandbox block and the warm-cache
   / `noRestore:true` / sandbox.network whitelist resolution paths.
-- `hooks/prewarm-direct-wrappers.py` — excludes `metals-direct` (races
+- `hooks/prewarm-direct-wrappers.py` — excludes `scala-direct` (races
   the IDE-spawned `metals-mcp`); probes backing-tool availability
   before firing (skips slots whose backing tool is no longer installed);
   stdout + stderr both discarded so SessionStart stays quiet.

@@ -15,6 +15,11 @@ first demonstrated for Scala in
 across the full set of language servers common in multi-stack
 monorepos.
 
+Naming note (2026-05-20): the Scala wrapper here is `scala-direct` so every
+wrapper follows the `<language>-direct` pattern (`py-direct`, `ts-direct`,
+`cs-direct`, etc.). Upstream's original `metals-direct` name is not
+retained — see `MIGRATION.md` for the one-shot state move.
+
 ## Why
 
 Native `LSP(operation=...)` calls in Claude Code cost ~8-9s per
@@ -59,7 +64,7 @@ across the session.
 ‡ Vue LS v3 is hybrid-mandatory (needs paired tsserver +
 `@vue/typescript-plugin`); Claude Code's plugin loader can't host the
 paired setup, so native `LSP()` on `.vue` isn't available.
-§ metals-direct cold of 0.14s is the server-adoption path (reuses an
+§ scala-direct cold of 0.14s is the server-adoption path (reuses an
 existing `metals-mcp` via `<workspace>/.metals/mcp.json`); fresh cold
 with Bloop re-import is 30-120s.
 ¶ java "before" matches the documented `LSP()` tool harness
@@ -170,7 +175,7 @@ CLI → <tool>-direct (bash)
 - HTTP `/health` for liveness — sandboxed environments deny
   `kill -0` and `/dev/tcp`.
 - Method-name contract: raw LSP method names for LSPs (unmodified
-  from the underlying server), except `metals-direct` which exposes
+  from the underlying server), except `scala-direct` which exposes
   `metals-mcp`'s 17-tool MCP surface. Named methods for build tools
   and formatters (`task`, `build`, `format`, `lint-files`, …).
 - Subcommands shared across wrappers: `start`, `call`, `tools`, `stop`,
@@ -225,7 +230,7 @@ wrappers. Then install only the backend(s) your wrapper needs:
 | `cs-direct` | `dotnet tool install -g csharp-ls` |
 | `vue-direct` | `npm i -g @vue/language-server@3.2.6 @vue/typescript-plugin@3.2.6 typescript@5.9.3` |
 | `java-direct` | `brew install jdtls` (macOS) — any JDK 17+ |
-| `metals-direct` | `brew install metals` |
+| `scala-direct` | `brew install metals` |
 | `sbt-direct` | `brew install sbt` (or sdkman) |
 | `dotnet-direct` | .NET SDK already present if you use csharp |
 | `prettier-direct` | `npm i -g prettier` (or workspace-local `pnpm add -D prettier`) |
@@ -238,6 +243,26 @@ Then call only the wrapper you want:
 java-direct call textDocument/documentSymbol \
   '{"textDocument":{"uri":"file:///path/to/File.java"}}'
 ```
+
+### Multi-file fan-out (`batch` / `batch-json`)
+
+Every wrapper backed by `tool-server-proxy.js` or `node-formatter-daemon.js` exposes a `/batch` HTTP route. Two CLI surfaces:
+
+- `<wrapper>-direct batch <method> <abs-file>...` — LSP convenience for textDocument/* methods. Builds `{textDocument:{uri:"file://<abs>"}}` per file. Available on `ts-direct`, `py-direct`, `cs-direct`, `java-direct`, `vue-direct`.
+- `<wrapper>-direct batch-json '<json-array>' [workspace]` — raw multi-call passthrough. Available on every wrapper above plus `prettier-direct`, `eslint-direct`, `scalafmt-direct`, `sbt-direct`, `dotnet-direct`.
+
+```bash
+# 3-file documentSymbol in one HTTP roundtrip + one tool_result
+ts-direct batch textDocument/documentSymbol /abs/A.ts /abs/B.ts /abs/C.ts
+
+# mixed-method fan-out
+py-direct batch-json '[
+  {"method":"workspace/symbol","params":{"query":"Foo"}},
+  {"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///abs/x.py"},"position":{"line":0,"character":0}}}
+]'
+```
+
+When querying ≥2 files with the same method against the same wrapper, callers MUST use `batch` (or `batch-json`) — `hooks/enforce-batch-on-direct-call.py` PreToolUse hook blocks 2nd same-method `call` within 60s. Per-call envelope `{ok:true,value}|{ok:false,error}` per sub-call so one bad uri NEVER poisons siblings. `scala-direct` is excluded — speaks MCP, not the harness `/batch` surface.
 
 Wrappers whose backing binary isn't installed no-op cleanly —
 `java-direct` won't interfere with a Python-only workflow and vice
@@ -302,6 +327,27 @@ agents.
 
 Do it at your own discretion — the changes are small and visible,
 but you own your sandbox config.
+
+## Operational tools
+
+Diagnostic + maintenance CLIs that ship with the wrappers (all installed under `~/.claude/bin/` by `install.sh`):
+
+| tool | purpose |
+|---|---|
+| `lsp-direct-reap` | kill leaked coordinator daemons. Modes: `--orphans` (workspace dir gone), `--under <path>` (workspace inside path), `--all-stale <min>` (idle threshold), `--by-backend-pid <pid>` (registry reverse-lookup), `--dry-run` |
+| `lsp-direct-ps` | list live coordinators + backends from central registry `~/.cache/claude-lsp-direct/registry.tsv`. Filters: `--workspace <prefix>`, `--wrapper <name>`, `--json`, `--all` (include dead), `--prune` |
+| `lsp-week.sh` | 7-day aggregate over `~/.claude/activity.log` + registry. Emits JSON with spawns-per-day, per-wrapper counts, orphan-rate %, top-N workspaces. Usage: `lsp-week.sh [days=7]` |
+| `bin/lib/spawn-detached.py` | helper used by shell wrappers (currently `scala-direct`) to gain `setsid()`-equivalent process-group semantics — required for atomic group-kill of LSP grandchildren on macOS where `setsid` CLI is absent by default |
+
+## Environment variables
+
+| var | default | effect |
+|---|---|---|
+| `LSP_DIRECT_IDLE_MS` | `1800000` (30 min) | coordinator self-exits after no /lsp activity for this duration; 0 disables |
+| `LSP_DIRECT_PARENT_WATCHDOG_MS` | `60000` (60s) | parent-PID liveness poll interval; coordinator exits when claude crashes without SIGTERM; 0 disables. Skipped when ppid==1 (already-orphaned coordinators where wrapper owns lifecycle) |
+| `LSP_REAP_SKIP_SESSION_CHECK` | unset | when set to `1`, the Stop-hook stale sweep fires regardless of how many claude sessions are alive (bypasses multi-session-awareness in `reap-stale-lsp-on-stop.py`) |
+| `METALS_MCP_BIN` | `metals-mcp` (PATH) | override for the metals-mcp binary path (consumed by scala-direct path) |
+| `<WRAPPER>_DIRECT_STATE` | `~/.cache/<wrapper>/` | per-wrapper state dir override (e.g. `PY_DIRECT_STATE=/custom/path`) |
 
 ## Tested versions
 
