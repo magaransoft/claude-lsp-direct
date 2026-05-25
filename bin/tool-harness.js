@@ -349,11 +349,20 @@ const framing = {
 
 // jsonRpcClient — correlation helper for JSON-RPC 2.0 stdio peers
 // (LSP, sbt thin client). Call handleMessage(msg) from the framer's
-// onMessage callback. Provides request/notify + null-ack for
-// server-initiated requests by default.
-function jsonRpcClient({ send, onServerRequest, onNotification, onResponseError }) {
+// onMessage callback. Provides request/notify + per-adapter reverse-RPC
+// dispatch for server-initiated requests.
+//
+// reverse-RPC dispatch precedence (roslyn-reverse-rpc-lsp-stdio ADR-001/002/003):
+//   serverRequestHandlers[method](params, ctx)  // per-method handler — try/catch → -32603 on throw
+//   onServerRequest(msg, sendResult)            // legacy callback — try/catch → -32603 on throw
+//   serverRequestDefault === 'method-class-aware'  // → -32601 Method not found
+//   default 'null-ack'                          // → { result: null }  (back-compat preserved)
+function jsonRpcClient({ send, onServerRequest, onNotification, onResponseError, serverRequestHandlers, serverRequestDefault = 'null-ack', ctx }) {
   const pending = new Map();
   let nextId = 0;
+  // counter for -32601 responses emitted under method-class-aware default
+  // (roslyn-reverse-rpc Slice 3 observability — surfaced via statusFn).
+  let unknownServerRequests = 0;
   return {
     request(method, params) {
       return new Promise((resolve, reject) => {
@@ -381,8 +390,23 @@ function jsonRpcClient({ send, onServerRequest, onNotification, onResponseError 
         return;
       }
       if (msg.method && msg.id !== undefined) {
-        if (onServerRequest) {
-          onServerRequest(msg, (result) => send({ jsonrpc: '2.0', id: msg.id, result }));
+        const handler = serverRequestHandlers && serverRequestHandlers[msg.method];
+        if (handler) {
+          try {
+            const result = handler(msg.params, ctx);
+            send({ jsonrpc: '2.0', id: msg.id, result });
+          } catch (e) {
+            send({ jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: 'Internal error: ' + e.message } });
+          }
+        } else if (onServerRequest) {
+          try {
+            onServerRequest(msg, (result) => send({ jsonrpc: '2.0', id: msg.id, result }));
+          } catch (e) {
+            send({ jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: 'Internal error: ' + e.message } });
+          }
+        } else if (serverRequestDefault === 'method-class-aware') {
+          unknownServerRequests++;
+          send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found: ' + msg.method } });
         } else {
           send({ jsonrpc: '2.0', id: msg.id, result: null });
         }
@@ -393,6 +417,7 @@ function jsonRpcClient({ send, onServerRequest, onNotification, onResponseError 
       }
     },
     pendingCount: () => pending.size,
+    unknownServerRequests: () => unknownServerRequests,
   };
 }
 

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 STATE_ROOT="${CS_ROSLYN_DIRECT_STATE:-$HOME/.cache/cs-roslyn-direct}"
-PROXY="$HOME/.claude/bin/lsp-stdio-proxy.js"
+PROXY="$HOME/.claude/bin/cs-roslyn-direct-coordinator.js"
 
 # locate Roslyn LS binary: env override → highest-version arm64 VSCode csharp ext → any platform variant
 if [ -n "${CS_ROSLYN_BIN:-}" ]; then

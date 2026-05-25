@@ -23,6 +23,7 @@ WRAPPERS=(
   "ts-direct|fixtures/typescript|textDocument/documentSymbol|{\"textDocument\":{\"uri\":\"file://${REPO_ROOT}/fixtures/typescript/hello.ts\"}}"
   "java-direct|fixtures/java|workspace/symbol|{\"query\":\"Main\"}"
   "cs-direct|fixtures/csharp|workspace/symbol|{\"query\":\"Main\"}"
+  "cs-roslyn-direct|fixtures/csharp|textDocument/documentSymbol|{\"textDocument\":{\"uri\":\"file://${REPO_ROOT}/fixtures/csharp/hello.cs\"}}"
   "vue-direct|fixtures/vue|textDocument/documentSymbol|{\"textDocument\":{\"uri\":\"file://${REPO_ROOT}/fixtures/vue/src/App.vue\"}}"
   "scala-direct|fixtures/scala-sbt|list-modules|{}"
 )

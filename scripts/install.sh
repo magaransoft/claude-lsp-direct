@@ -13,8 +13,10 @@ CLAUDE="${CLAUDE:-$HOME/.claude}"
 BIN_FILES=(
   # LSP wrappers
   scala-direct vue-direct py-direct ts-direct cs-direct java-direct
+  cs-roslyn-direct
   # LSP coordinators (shim entrypoints)
   vue-direct-coordinator.js lsp-stdio-proxy.js
+  cs-roslyn-direct-coordinator.js
   # Opt-in build-tool wrappers + coordinators
   sbt-direct sbt-direct-coordinator.js
   dotnet-direct dotnet-direct-coordinator.js
@@ -130,6 +132,7 @@ if [ -f "$SETTINGS" ]; then
       "Bash(~/.claude/bin/py-direct *)",
       "Bash(~/.claude/bin/ts-direct *)",
       "Bash(~/.claude/bin/cs-direct *)",
+      "Bash(~/.claude/bin/cs-roslyn-direct *)",
       "Bash(~/.claude/bin/java-direct *)",
       "Bash(~/.claude/bin/sbt-direct *)",
       "Bash(~/.claude/bin/dotnet-direct *)",
@@ -143,6 +146,7 @@ if [ -f "$SETTINGS" ]; then
       "~/.cache/py-direct/**",
       "~/.cache/ts-direct/**",
       "~/.cache/cs-direct/**",
+      "~/.cache/cs-roslyn-direct/**",
       "~/.cache/java-direct/**",
       "~/.cache/sbt-direct/**",
       "~/.cache/dotnet-direct/**",

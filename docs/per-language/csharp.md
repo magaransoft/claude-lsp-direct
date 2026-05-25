@@ -63,18 +63,41 @@ When querying >=2 files with the same method, callers MUST use `batch` (or `batc
 
 Inspect `log` if cold start hangs past 180s (the coordinator's own timeout) — MSBuild issues surface there.
 
-## Roslyn LS scaffold (experimental, not yet wired)
-`bin/cs-roslyn-direct` exists as a parallel wrapper targeting Microsoft Roslyn Language Server (the binary shipped with the VS Code C# Dev Kit at `~/.vscode/extensions/ms-dotnettools.csharp-*/.roslyn/Microsoft.CodeAnalysis.LanguageServer`) instead of csharp-ls. Goal: ~10× cold-start improvement on `documentSymbol` for mid-size .NET projects. **Currently NOT installed by `scripts/install.sh`** because the integration is blocked.
+## Roslyn LS — `cs-roslyn-direct`
+Alongside `cs-direct` (csharp-ls), `bin/cs-roslyn-direct` ships as a parallel wrapper targeting Microsoft Roslyn Language Server (the binary shipped with the VS Code C# Dev Kit at `~/.vscode/extensions/ms-dotnettools.csharp-*/.roslyn/Microsoft.CodeAnalysis.LanguageServer`). Both wrappers install unconditionally via `scripts/install.sh`; operators pick at INVOKE time (`cs-direct` vs `cs-roslyn-direct`). State dirs are separate (`~/.cache/cs-direct/` vs `~/.cache/cs-roslyn-direct/`), so there is no port or pid collision.
 
-### Blocker
-Roslyn LS issues a server→client `workspace/configuration` request during `OnInitializedAsync`. `bin/lsp-stdio-proxy.js` + `bin/adapters/lsp-stdio.js` + `bin/tool-server-proxy.js` are uni-directional (client→server only). Without a response, Roslyn LS hits `Contract.Fail` in `DidChangeConfigurationNotificationHandler.cs:128` and SIGABRTs. csharp-ls works because it does NOT issue reverse-RPC.
+### Install prereq
+```bash
+# VS Code C# Dev Kit ships the Roslyn LS binary; no separate install
+code --install-extension ms-dotnettools.csharp
+# Or set CS_ROSLYN_BIN to point at a Microsoft.CodeAnalysis.LanguageServer absolute path.
+```
 
-### Resumption path
-Extend `bin/adapters/lsp-stdio.js` to detect server-initiated requests (incoming JSON-RPC with `method`+`id` but no `result`/`error`). Inject canned responses for known reverse-RPCs:
-- `workspace/configuration` → return `[{}]` per item in `params.items` (empty config object array)
-- `client/registerCapability` → return `null` (accept all dynamic registrations)
-- `window/workDoneProgress/create` → return `null`
+### Invocation
+```bash
+cs-roslyn-direct start                                          # cwd walk-up for .slnx/.sln/.csproj
+cs-roslyn-direct call textDocument/documentSymbol \
+  '{"textDocument":{"uri":"file:///abs/path/to/File.cs"}}'
+```
 
-Alternative: forward server-initiated requests to a side-channel HTTP endpoint so the wrapper or upstream caller can respond.
+The CLI surface mirrors `cs-direct` — `start`, `call`, `tools`, `batch`, `batch-json`, `stop`, `status`, `prune`.
 
-After the proxy supports reverse-RPC, wire `cs-roslyn-direct` into `scripts/install.sh` as the recommended C# wrapper, deprecate `cs-direct`. Benchmark target: csharp-ls measured at ~2.18s on `documentSymbol` warm-call against a single-file project; Roslyn LS expected to land sub-300ms based on VS Code C# Dev Kit characteristics.
+### Quirks
+- **`window/showMessageRequest` null-dismissal:** Roslyn LS may issue server→client dialog requests (e.g. "Switch to Debug build? [Yes / No]"). The default response is `null` — equivalent to the user dismissing the dialog without picking an action. Every dismissal emits a stderr line:
+  ```
+  [cs-roslyn] showMessageRequest dismissed: title="..." actions=[0:Yes,1:No] — set CS_ROSLYN_MESSAGE_RESPONSE=<idx> to auto-pick
+  ```
+  Set `CS_ROSLYN_MESSAGE_RESPONSE=<idx>` to auto-pick `params.actions[idx]` for the next invocation. The env var applies per invocation and is reversible without a code edit.
+- **Reverse-RPC handler set (5 methods):** `workspace/configuration` (returns `[{}]` per item), `workspace/workspaceFolders`, `client/registerCapability` (null), `window/workDoneProgress/create` (null), `window/showMessageRequest` (above). Server-initiated requests outside this set get JSON-RPC `-32601 Method not found` per the method-class-aware default (ADR-002 of `roslyn-reverse-rpc-lsp-stdio.md`). The count surfaces in `cs-roslyn-direct status` via the proxy `/status` endpoint and in `lsp-week.sh` under `unknown_server_requests`.
+- **Cold start:** measured ~1.28s p50 against the fixtures/csharp single-file workspace (2026-05-25). Larger solutions remain to be benchmarked.
+
+### Benchmarks
+| wrapper | fixture | cold_ms_p50 | cold_ms_p99 | n | timestamp |
+|---|---|---:|---:|---:|---|
+| cs-direct (csharp-ls) | fixtures/csharp | 2440 | 2441 | 2 | 2026-05-25T14:24:49Z |
+| cs-roslyn-direct (Roslyn LS) | fixtures/csharp | 1279 | 1310 | 2 | 2026-05-25T17:50:24Z |
+
+Roslyn LS lands ~1.9× faster cold-start than csharp-ls on the single-file fixture. Real-solution measurements will be added per the 7-day post-merge observation window (ADR-005 graduation gate).
+
+### State directory
+`~/.cache/cs-roslyn-direct/<workspace-hash>/{pid,port,workspace,log}` — disjoint from `~/.cache/cs-direct/`.

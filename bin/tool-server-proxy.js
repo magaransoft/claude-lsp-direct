@@ -194,12 +194,12 @@ async function createProxy({ adapter, workspace, port, toolName }) {
   // pre-build jsonRpcClient helpers for any contentLength child — adapter
   // can delegate LSP-style correlation via ctx.rpc[childId] without
   // re-implementing pending-map bookkeeping.
+  //
+  // ctx is constructed BEFORE the rpc population loop so that reverse-RPC
+  // handlers (roslyn-reverse-rpc-lsp-stdio ADR-001/006) receive the full
+  // proxy ctx (workspace, state, log) at request time. rpc + state are
+  // referenced by closure — populated below; consumers fire at runtime.
   const rpc = {};
-  for (const [id, c] of Object.entries(children)) {
-    if (c.spec.frame === 'contentLength') {
-      rpc[id] = jsonRpcClient({ send: c.send });
-    }
-  }
 
   // adapter-scoped state map (used by vue-hybrid for tsserver bridge
   // tables, by LSP adapters for openedUris set, etc.)
@@ -240,6 +240,23 @@ async function createProxy({ adapter, workspace, port, toolName }) {
       if (rpc[childId]) rpc[childId].handleMessage(msg);
     },
   };
+
+  // populate rpc[id] with per-child jsonRpcClient — read adapter-supplied
+  // reverse-RPC dispatch policy (roslyn-reverse-rpc-lsp-stdio ADR-001/003):
+  //   adapter.serverRequestHandlers[childId][method] → per-method handler
+  //   adapter.serverRequestDefault                   → 'null-ack' (default) | 'method-class-aware'
+  // unset → harness null-ack preserved verbatim (back-compat for py/ts/cs/java/vue).
+  for (const [id, c] of Object.entries(children)) {
+    if (c.spec.frame === 'contentLength') {
+      const handlers = adapter.serverRequestHandlers && adapter.serverRequestHandlers[id];
+      rpc[id] = jsonRpcClient({
+        send: c.send,
+        serverRequestHandlers: handlers,
+        serverRequestDefault: adapter.serverRequestDefault || 'null-ack',
+        ctx,
+      });
+    }
+  }
 
   // invalidation loop — stat on every /call; hard wins over soft
   const invalidator = invalidationLoop({
@@ -283,9 +300,16 @@ async function createProxy({ adapter, workspace, port, toolName }) {
         alive: c.proc.exitCode === null && !c.proc.killed,
         exitCode: c.proc.exitCode,
       }));
+      // sum -32601 responses across child rpc clients (Slice 3 observability;
+      // counter increments in jsonRpcClient under method-class-aware default)
+      let unknownServerRequests = 0;
+      for (const r of Object.values(rpc)) {
+        if (typeof r.unknownServerRequests === 'function') unknownServerRequests += r.unknownServerRequests();
+      }
       return {
         children: list,
         childrenAlive: list.every(c => c.alive),
+        unknown_server_requests: unknownServerRequests,
       };
     },
     async onCall({ method, params }) {
