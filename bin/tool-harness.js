@@ -298,6 +298,17 @@ const framing = {
     },
   },
 
+  // noop — no stdio framing. Use for child processes that own their
+  // own RPC channel (HTTP / unix socket / MCP) and whose stdout/stderr
+  // are diagnostic-only. The coordinator still spawns the child with
+  // detached:true (for process-group kill) but never reads its stdio.
+  // Used by adapters/metals-mcp.js since metals-mcp speaks HTTP-MCP
+  // not stdio-JSON-RPC. Per orphan-teardown ADR-003.
+  noop: {
+    reader() { return function onData() { /* drop all bytes */ }; },
+    writer() { return function send() { /* never sent */ }; },
+  },
+
   // tsserverMixed — tsserver emits either Content-Length-framed or
   // plain \n-delimited JSON. Shape matches the vue coordinator's
   // handling; used in wave 2 step 5.

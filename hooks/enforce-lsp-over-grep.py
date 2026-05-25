@@ -191,6 +191,20 @@ TEXT_TOOL_HEADS = {"awk", "gawk", "mawk", "sed", "perl"}
 INLINE_SCRIPT_HEADS = {"python", "python3", "perl", "ruby"}
 INLINE_SCRIPT_FLAG_RE = re.compile(r"(?:^|\s)-[ce](?:\s|$|[A-Za-z])")
 
+# find with one of these flags is metadata-filter intent (no content access) — no LSP equivalent
+# for "files newer than N days" / "files larger than N bytes" / "empty files" etc.
+# -name/-type/-maxdepth alone are NOT enough; require explicit time/size/perm/owner discriminator.
+_FIND_METADATA_FLAGS_RE = re.compile(
+    r"-(?:mtime|atime|ctime|mmin|amin|cmin|size|newer|empty|perm|user|group|uid|gid)\b"
+)
+# ANY -exec / -execdir flag invalidates the metadata-only exemption.
+# direct form (-exec grep ...) is obvious content-scan; shell-wrapper forms
+# (-exec sh -c 'grep ...' \;, -exec bash -c 'awk ...' \;) and arbitrary-binary
+# forms (-exec /custom/scanner {} \;) smuggle content access through indirection.
+# treating every -exec/-execdir as content-scan intent is safer than enumerating
+# every wrapper shape (per codex 2026-05-25 audit on slice-c).
+_FIND_EXEC_ANY_RE = re.compile(r"-exec(?:dir)?\b")
+
 # exempt-path hints: source-extension files under these dirs are TEST FIXTURE / SNAPSHOT data;
 # legitimate to text-scan because the content is non-semantic (golden output, captured payloads).
 # matches when any path segment equals one of these names
@@ -489,11 +503,21 @@ def _strip_xargs_prefix(seg: str) -> str:
 
 
 def _shell_segments(cmd: str) -> list:
-    """top-level segments of cmd, plus payloads of `bash -c '...'`, with xargs prefixes stripped."""
+    """top-level segments of cmd, plus payloads of `bash -c '...'`, with xargs prefixes stripped.
+
+    Special-case: `find ... -exec sh -c '...' \\;` — the bash/sh -c here is internal to find
+    (lets find pass each match to a shell script), NOT a top-level indirection wrapper.
+    Preserve the find segment intact so detect_langs sees the -name pattern + flags; otherwise
+    the shell-wrapper bypass evades enforcement (per codex 2026-05-25 audit gap)."""
     out = []
     for top in _split_top_level(cmd):
         s = top.strip()
         if not s:
+            continue
+        head = s.split()[0] if s.split() else ""
+        if head == "find":
+            # keep find whole — its -exec sh -c '...' is find-internal, not top-level
+            out.append(_strip_xargs_prefix(s))
             continue
         m = _BASH_C_RE.search(s)
         if m:
@@ -504,18 +528,57 @@ def _shell_segments(cmd: str) -> list:
     return out
 
 
+def _seg_head(s: str) -> str:
+    """tool head of a single segment, '' if empty."""
+    parts = s.strip().split()
+    return parts[0] if parts else ""
+
+
+def _is_metadata_only_find_segment(seg: str) -> bool:
+    """True when find segment uses metadata-filter flag(s) AND has NO -exec/-execdir at all.
+    Pure filesystem listing (find . -name '*.py' -mtime +60) has no LSP equivalent — exempt.
+    ANY -exec/-execdir (including shell-wrapper indirection `-exec sh -c '...grep...' \\;`
+    and arbitrary-binary forms `-exec /custom/scanner {} \\;`) smuggles content-scan intent
+    and forfeits the metadata-only exemption — per codex 2026-05-25 audit gap on indirection."""
+    if _seg_head(seg) != "find":
+        return False
+    if not _FIND_METADATA_FLAGS_RE.search(seg):
+        return False
+    if _FIND_EXEC_ANY_RE.search(seg):
+        return False
+    return True
+
+
 def scan_bash_command(cmd: str) -> tuple:
     """analyze a (possibly compound) Bash command; returns (unscoped_recursive, langs).
     unscoped_recursive: any segment is an unscoped recursive grep/rg.
     langs: set of code languages targeted by extension across all search-tool segments,
     EXCLUDING segments where every positional source-path is under an exempt dir
-    (fixtures/, __snapshots__/, testdata/, etc. — text-scan on fixture data is legitimate)."""
+    (fixtures/, __snapshots__/, testdata/, etc. — text-scan on fixture data is legitimate),
+    AND EXCLUDING metadata-only find segments (find -name X -mtime/-size/...) when no
+    downstream search-tool segment consumes find's output (`find ... | xargs grep` still blocks)."""
     segments = [s for s in (seg.strip() for seg in _shell_segments(cmd)) if s]
     if not any(is_search_tool(s) for s in segments):
+        return (False, set())
+    # non-find content-search tool present anywhere in the pipeline?
+    # if yes, metadata-find segments STILL contribute langs (find feeding grep/awk via pipe/xargs)
+    has_content_search = any(
+        is_search_tool(s) and _seg_head(s) != "find"
+        for s in segments
+    )
+    # whether any segment is a REAL search target (excludes pure metadata-find)
+    has_real_search = has_content_search or any(
+        is_search_tool(s) and _seg_head(s) == "find" and not _is_metadata_only_find_segment(s)
+        for s in segments
+    )
+    if not has_real_search:
         return (False, set())
     unscoped = any(is_unscoped_recursive_grep(s) for s in segments)
     langs: set = set()
     for s in segments:
+        if _is_metadata_only_find_segment(s) and not has_content_search:
+            # pure metadata listing, no content-scan downstream → exempt
+            continue
         seg_langs = detect_langs(s)
         # skip when this segment's source-paths are ALL under exempt dirs — fixture/snapshot data
         if seg_langs and _all_source_paths_exempt(s):
@@ -707,6 +770,26 @@ def _selftest() -> int:
         ("awk '/x/{print}' /a/src/main/scala/Foo.scala",                (False, {"scala"})),
         # git show piped to awk on source content → block (extracted source content is still source)
         ("git show HEAD:src/Foo.scala | awk '/pattern/{print}'",        (False, set())),  # awk has no positional file arg here; intent ambiguous, allow
+        # find metadata-only — pure filesystem listing has no LSP equivalent; exempt
+        ("find . -name '*.py' -mtime +60",                              (False, set())),
+        ("find ~/.claude/hooks -name '*.py' -mtime +60 -maxdepth 1",    (False, set())),
+        ("find /a -name '*.scala' -size +10c",                          (False, set())),
+        ("find /a -name '*.ts' -newer ref.txt",                         (False, set())),
+        ("find /a -name '*.py' -empty",                                 (False, set())),
+        ("find /a -name '*.py' -perm 0644",                             (False, set())),
+        # find -name without metadata flag → still blocks (content-scan intent ambiguous, conservatively block)
+        ("find /a -name '*.py'",                                        (False, {"python"})),
+        # find -name + -mtime + -exec grep → direct -exec → metadata-only off → block
+        ("find /a -name '*.py' -mtime +60 -exec grep -l foo {} \\;",   (False, {"python"})),
+        # find -name + -mtime piped to grep → has_content_search=True → block still applies
+        ("find /a -name '*.py' -mtime +60 | xargs grep foo",            (False, {"python"})),
+        # codex 2026-05-25 audit gap: shell-wrapper -exec smuggles content-scan via indirection
+        ("find /a -name '*.py' -mtime +60 -exec sh -c 'grep foo \"$1\"' _ {} \\;",  (False, {"python"})),
+        ("find /a -name '*.scala' -size +1k -exec bash -c 'awk /pat/ \"$1\"' _ {} \\;", (False, {"scala"})),
+        ("find /a -name '*.ts' -mtime +1 -execdir /custom/scanner {} \\;",          (False, {"typescript"})),
+        # -exec with non-content-scanner tool (e.g. ls, stat, rm) ALSO blocks now —
+        # conservative: codex flagged enumeration as fragile; safer to forfeit exemption on any -exec
+        ("find /a -name '*.py' -mtime +60 -exec ls -la {} \\;",        (False, {"python"})),
     ]
     for cmd, expected in scan_cases:
         got = scan_bash_command(cmd)

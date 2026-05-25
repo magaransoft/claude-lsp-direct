@@ -94,9 +94,24 @@ cmd_start() {
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
   : > "$dir/session"
-  nohup metals-mcp --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
+  # spawn-detached.py: setsid+exec so metals-mcp becomes its own process group leader.
+  # Required so that `kill -- -<pid>` reaps metals-mcp AND its bloop grandchild together.
+  # Without this, nohup keeps metals-mcp in the parent shell's PGID; on SIGTERM, bloop
+  # (which has its OWN socket-based libdaemon lifecycle) survives — the 3.89GB orphan
+  # observed in the orphan-teardown audit. Per slice-2 of the orphan-teardown pitch.
+  nohup python3 "$(dirname "$0")/lib/spawn-detached.py" "$dir/log" metals-mcp --workspace "$ws" --port "$port" >/dev/null 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
+  # ADR-004 — register backend lineage. Atomic via O_APPEND POSIX guarantee on writes <PIPE_BUF.
+  # Row schema matches tool-server-proxy.js registryAppend(): spawn_ts \t coordinator_pid \t backend_pid \t wrapper \t workspace \t parent_pid.
+  # For scala-direct: coordinator_pid == backend_pid (metals-mcp IS the coordinator, no proxy in front).
+  registry_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-lsp-direct"
+  registry_file="$registry_dir/registry.tsv"
+  mkdir -p "$registry_dir"
+  if [ ! -f "$registry_file" ]; then
+    printf 'spawn_ts\tcoordinator_pid\tbackend_pid\twrapper\tworkspace\tparent_pid\n' >> "$registry_file"
+  fi
+  printf '%s\t%s\t%s\tscala-direct\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$pid" "$pid" "$ws" "$PPID" >> "$registry_file"
   # wait up to 180s for server to bind tcp port — bloop import on cold .bloop may take a while
   local i=0
   until port_ready "$port"; do
@@ -178,8 +193,25 @@ cmd_stop() {
   dir="$(state_dir "$ws")"
   pid="$(state_get "$dir" pid)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid"
-    echo "stopped: pid=$pid workspace=$ws"
+    # group-kill — `kill -- -<pid>` signals the entire process group.
+    # Because we spawned via spawn-detached.py (own setsid → own PGID == own PID),
+    # this reaches metals-mcp + bloop grandchild atomically. Falls back to
+    # direct SIGTERM if group-kill is denied (shouldn't happen for own children).
+    if kill -- -"$pid" 2>/dev/null; then
+      echo "stopped: pid=$pid workspace=$ws (group-killed, includes bloop)"
+    else
+      kill "$pid" 2>/dev/null || true
+      echo "stopped: pid=$pid workspace=$ws (direct kill — group-kill denied)"
+    fi
+    # give 3s grace, then SIGKILL group if still alive
+    local i=0
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 6 ]; do
+      sleep 0.5
+      i=$((i+1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
   elif [ -z "$pid" ] && [ -n "$(state_get "$dir" port)" ]; then
     echo "unregistered adopted server for $ws (external process left running)"
   else

@@ -328,6 +328,27 @@ agents.
 Do it at your own discretion — the changes are small and visible,
 but you own your sandbox config.
 
+## Operational tools
+
+Diagnostic + maintenance CLIs that ship with the wrappers (all installed under `~/.claude/bin/` by `install.sh`):
+
+| tool | purpose |
+|---|---|
+| `lsp-direct-reap` | kill leaked coordinator daemons. Modes: `--orphans` (workspace dir gone), `--under <path>` (workspace inside path), `--all-stale <min>` (idle threshold), `--by-backend-pid <pid>` (registry reverse-lookup), `--dry-run` |
+| `lsp-direct-ps` | list live coordinators + backends from central registry `~/.cache/claude-lsp-direct/registry.tsv`. Filters: `--workspace <prefix>`, `--wrapper <name>`, `--json`, `--all` (include dead), `--prune` |
+| `lsp-week.sh` | 7-day aggregate over `~/.claude/activity.log` + registry. Emits JSON with spawns-per-day, per-wrapper counts, orphan-rate %, top-N workspaces. Usage: `lsp-week.sh [days=7]` |
+| `bin/lib/spawn-detached.py` | helper used by shell wrappers (currently `scala-direct`) to gain `setsid()`-equivalent process-group semantics — required for atomic group-kill of LSP grandchildren on macOS where `setsid` CLI is absent by default |
+
+## Environment variables
+
+| var | default | effect |
+|---|---|---|
+| `LSP_DIRECT_IDLE_MS` | `1800000` (30 min) | coordinator self-exits after no /lsp activity for this duration; 0 disables |
+| `LSP_DIRECT_PARENT_WATCHDOG_MS` | `60000` (60s) | parent-PID liveness poll interval; coordinator exits when claude crashes without SIGTERM; 0 disables. Skipped when ppid==1 (already-orphaned coordinators where wrapper owns lifecycle) |
+| `LSP_REAP_SKIP_SESSION_CHECK` | unset | when set to `1`, the Stop-hook stale sweep fires regardless of how many claude sessions are alive (bypasses multi-session-awareness in `reap-stale-lsp-on-stop.py`) |
+| `METALS_MCP_BIN` | `metals-mcp` (PATH) | override for the metals-mcp binary path (consumed by scala-direct path) |
+| `<WRAPPER>_DIRECT_STATE` | `~/.cache/<wrapper>/` | per-wrapper state dir override (e.g. `PY_DIRECT_STATE=/custom/path`) |
+
 ## Tested versions
 
 Exact versions this was developed and benchmarked against. Other

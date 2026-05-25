@@ -9,6 +9,18 @@ STATE_ROOT="${SCALAFMT_DIRECT_STATE:-$HOME/.cache/scalafmt-direct}"
 COORDINATOR="$HOME/.claude/bin/scalafmt-direct-coordinator.js"
 WORKSPACE_MARKERS=(.scalafmt.conf build.sbt build.sc build.mill)
 
+# shared cap-check helper — Layer B leak prevention
+# portable symlink-resolving source (readlink -f is GNU-only)
+__cap_src="${BASH_SOURCE[0]}"
+while [ -L "$__cap_src" ]; do
+  __cap_dir="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+  __cap_src="$(readlink "$__cap_src")"
+  case "$__cap_src" in /*) ;; *) __cap_src="$__cap_dir/$__cap_src" ;; esac
+done
+__CAP_BIN_DIR="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+# shellcheck source=./lib/cap-check.sh
+. "$__CAP_BIN_DIR/lib/cap-check.sh"
+
 die() { echo "scalafmt-direct: $*" >&2; exit 1; }
 
 resolve_workspace() {
@@ -58,6 +70,7 @@ cmd_start() {
     return 0
   fi
   port="$(free_port)"
+  cap_check_and_evict "scalafmt-direct" "$STATE_ROOT"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
   nohup node "$COORDINATOR" --tool-name scalafmt-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &

@@ -11,6 +11,18 @@ WORKSPACE_MARKERS=(global.json)
 # fallback markers checked via extension glob below
 FALLBACK_PATTERNS=('*.sln' '*.slnx' '*.csproj' '*.fsproj' '*.vbproj')
 
+# shared cap-check helper — Layer B leak prevention
+# portable symlink-resolving source (readlink -f is GNU-only)
+__cap_src="${BASH_SOURCE[0]}"
+while [ -L "$__cap_src" ]; do
+  __cap_dir="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+  __cap_src="$(readlink "$__cap_src")"
+  case "$__cap_src" in /*) ;; *) __cap_src="$__cap_dir/$__cap_src" ;; esac
+done
+__CAP_BIN_DIR="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+# shellcheck source=./lib/cap-check.sh
+. "$__CAP_BIN_DIR/lib/cap-check.sh"
+
 die() { echo "dotnet-direct: $*" >&2; exit 1; }
 
 resolve_workspace() {
@@ -65,6 +77,7 @@ cmd_start() {
     return 0
   fi
   port="$(free_port)"
+  cap_check_and_evict "dotnet-direct" "$STATE_ROOT"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
   nohup node "$COORDINATOR" --tool-name dotnet-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &

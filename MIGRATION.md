@@ -1,5 +1,18 @@
 # Migration notes
 
+## orphan-teardown unified fix (2026-05-25) — additive, no required action
+
+ADR-001 + ADR-002 land defensive changes (process-group spawn + parent-PID watchdog) for `tool-server-proxy.js` + `scala-direct`. All changes preserve previous behavior on the happy path. Two new env vars are added with safe defaults — users do NOT need to migrate state or update invocations.
+
+Behavioral deltas worth knowing:
+- `tool-server-proxy.js` now spawns LSP backends with `detached:true` → backend is its own process-group leader (pgid == pid). Shutdown paths (idle, sigHandler, close, hard-invalidation) use `kill(-pid, signal)` (group-kill) instead of `proc.kill()` (direct-kill). Closes the "grandchild orphan" pattern (pyright workers, jdtls indexers, tsserver plugin hosts, bloop daemons).
+- coordinator polls `process.kill(parentPid, 0)` every `LSP_DIRECT_PARENT_WATCHDOG_MS` (default 60s); on ESRCH the coordinator shuts down — closes the "claude crashed without SIGTERM" orphan path. Set `LSP_DIRECT_PARENT_WATCHDOG_MS=0` to disable if you spawn coordinators independent of claude.
+- `scala-direct`'s `cmd_start` now spawns metals-mcp via `bin/lib/spawn-detached.py` (setsid+exec) so metals + bloop are in the same process group. `cmd_stop` group-kills with 3s grace + SIGKILL escalation. No state-format change.
+- Central registry `~/.cache/claude-lsp-direct/registry.tsv` is appended on every coordinator-spawned backend AND every metals-mcp spawn. Query via new `lsp-direct-ps` CLI (see README § Operational tools).
+- `~/.claude/hooks/reap-stale-lsp-on-stop.py` (companion change, NOT in this repo) defers the 60-min stale sweep when other claude sessions are alive. Set `LSP_REAP_SKIP_SESSION_CHECK=1` to force the sweep regardless.
+
+If you run `scripts/install.sh` again, new files (`bin/lsp-direct-ps`, `bin/lib/spawn-detached.py`) get symlinked. Re-run is idempotent.
+
 ## scala-direct rename (2026-05-20) — BREAKING
 
 `bin/metals-direct` renamed to `bin/scala-direct` for naming consistency

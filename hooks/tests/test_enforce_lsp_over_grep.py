@@ -77,7 +77,7 @@ def test_blocks_when_lsp_available(fake_home, cmd, lang):
         (fake_home / ".claude" / "bin" / name).write_text("#!/bin/sh\nexit 0")
         (fake_home / ".claude" / "bin" / name).chmod(0o755)
     _write_availability(fake_home, {"lsps": {
-        "scala":      {"tool":"metals-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
+        "scala":      {"tool":"scala-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
         "python":     {"tool":"py-direct","binary":str(fake_home / ".claude" / "bin" / "py-direct"),"backend":"pyright-langserver","workspace":"/w"},
         "typescript": {"tool":"ts-direct","binary":str(fake_home / ".claude" / "bin" / "ts-direct"),"backend":"typescript-language-server","workspace":"/w"},
         "csharp":     {"tool":"cs-direct","binary":str(fake_home / ".claude" / "bin" / "cs-direct"),"backend":"csharp-ls","workspace":"/w"},
@@ -106,7 +106,7 @@ def test_blocks_when_lsp_available(fake_home, cmd, lang):
 ])
 def test_passthrough_non_code_and_non_search(fake_home, cmd):
     _write_availability(fake_home, {"lsps": {
-        "scala": {"tool":"metals-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
+        "scala": {"tool":"scala-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
     }})
     rc, _, _ = _run(_bash(cmd), fake_home)
     assert rc == 0
@@ -130,7 +130,7 @@ def test_unscoped_recursive_grep_blocked(fake_home, cmd):
 def test_find_literal_code_filename_blocked(fake_home):
     # -name with literal filename carrying a code extension must route the same as -name '*.scala'
     _write_availability(fake_home, {"lsps": {
-        "scala": {"tool":"metals-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
+        "scala": {"tool":"scala-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
     }})
     rc, _, err = _run(_bash('find api/app -name "Foo.scala"'), fake_home)
     assert rc == 2, f"expected BLOCK\n{err}"
@@ -157,7 +157,7 @@ def test_unscoped_recursive_grep_allowed_when_scoped(fake_home, cmd):
 
 def test_scala_warn_when_metals_mcp_missing(fake_home):
     _write_availability(fake_home, {"lsps": {
-        "scala": {"tool":"metals-direct","binary":"/x","backend":None,"workspace":"/w"},
+        "scala": {"tool":"scala-direct","binary":"/x","backend":None,"workspace":"/w"},
     }})
     rc, _, err = _run(_bash('grep -rn foo ~/x --include="*.scala"'), fake_home)
     assert rc == 0
@@ -230,7 +230,7 @@ def test_native_grep_blocks_when_lsp_available(fake_home, kw, lang):
         (fake_home / ".claude" / "bin" / name).write_text("#!/bin/sh\nexit 0")
         (fake_home / ".claude" / "bin" / name).chmod(0o755)
     _write_availability(fake_home, {"lsps": {
-        "scala":      {"tool":"metals-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
+        "scala":      {"tool":"scala-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
         "python":     {"tool":"py-direct","binary":str(fake_home / ".claude" / "bin" / "py-direct"),"backend":"pyright-langserver","workspace":"/w"},
         "typescript": {"tool":"ts-direct","binary":str(fake_home / ".claude" / "bin" / "ts-direct"),"backend":"typescript-language-server","workspace":"/w"},
         "csharp":     {"tool":"cs-direct","binary":str(fake_home / ".claude" / "bin" / "cs-direct"),"backend":"csharp-ls","workspace":"/w"},
@@ -251,7 +251,7 @@ def test_native_grep_blocks_when_lsp_available(fake_home, kw, lang):
     {},  # bare pattern search — no lang signal
 ])
 def test_native_grep_passthrough(fake_home, kw):
-    _write_availability(fake_home, {"lsps": {"scala": {"tool":"metals-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"}}})
+    _write_availability(fake_home, {"lsps": {"scala": {"tool":"scala-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"}}})
     rc, _, _ = _run(_grep_tool(**kw), fake_home)
     assert rc == 0
 
@@ -272,7 +272,7 @@ def test_bash_blocks_positional_code_file(fake_home, cmd, lang):
         (fake_home / ".claude" / "bin" / name).write_text("#!/bin/sh\nexit 0")
         (fake_home / ".claude" / "bin" / name).chmod(0o755)
     _write_availability(fake_home, {"lsps": {
-        "scala":      {"tool":"metals-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
+        "scala":      {"tool":"scala-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
         "python":     {"tool":"py-direct","binary":str(fake_home / ".claude" / "bin" / "py-direct"),"backend":"pyright-langserver","workspace":"/w"},
         "typescript": {"tool":"ts-direct","binary":str(fake_home / ".claude" / "bin" / "ts-direct"),"backend":"typescript-language-server","workspace":"/w"},
         "csharp":     {"tool":"cs-direct","binary":str(fake_home / ".claude" / "bin" / "cs-direct"),"backend":"csharp-ls","workspace":"/w"},
@@ -296,7 +296,7 @@ def test_bash_positional_non_code_passes(fake_home):
 
 def test_ignores_non_bash_tool(fake_home):
     _write_availability(fake_home, {"lsps": {
-        "scala": {"tool":"metals-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
+        "scala": {"tool":"scala-direct","binary":"/x","backend":"metals-mcp","workspace":"/w"},
     }})
     payload = {"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path":"/x.scala"}}
     rc, _, _ = _run(payload, fake_home)
@@ -433,7 +433,7 @@ def _scala_ready(home: Path) -> None:
         (home / ".claude" / "bin" / name).write_text("#!/bin/sh\nexit 0")
         (home / ".claude" / "bin" / name).chmod(0o755)
     _write_availability(home, {"lsps": {
-        "scala":  {"tool": "metals-direct", "binary": "/x", "backend": "metals-mcp", "workspace": "/w"},
+        "scala":  {"tool": "scala-direct", "binary": "/x", "backend": "metals-mcp", "workspace": "/w"},
         "python": {"tool": "py-direct", "binary": str(home / ".claude" / "bin" / "py-direct"),
                    "backend": "pyright-langserver", "workspace": "/w"},
         "vue":    {"tool": "vue-direct", "binary": str(home / ".claude" / "bin" / "vue-direct"),
@@ -444,10 +444,10 @@ def _scala_ready(home: Path) -> None:
 @pytest.mark.parametrize("cmd,needle", [
     # search tool is NOT the first token — was a silent bypass before
     ('cd api && grep -rn Foo modules/core/',                  "unscoped recursive"),
-    ('MEMDIR=x; grep -rln --include="*.scala" Foo /repo/api', "metals-direct"),
+    ('MEMDIR=x; grep -rln --include="*.scala" Foo /repo/api', "scala-direct"),
     ('cat list.txt | rg MatchUpId /repo/api/scala-src',       "unscoped recursive"),
-    ('find /repo/api -name "*.scala" | xargs grep -l Foo',    "metals-direct"),
-    ('bash -c "grep -rn Foo /repo --include=*.scala"',        "metals-direct"),
+    ('find /repo/api -name "*.scala" | xargs grep -l Foo',    "scala-direct"),
+    ('bash -c "grep -rn Foo /repo --include=*.scala"',        "scala-direct"),
     ('echo $(grep -rn Foo /repo --include=*.py)',             "py-direct"),
     ('( grep -rn Foo /repo/web --include=*.vue )',            "vue-direct"),
 ])
@@ -484,7 +484,7 @@ def test_escalation_banner_after_threshold(fake_home):
     assert rc == 2 and "ESCALATION" not in err, err  # 1st block: no banner
     rc, _, err = _run({**_bash('grep -rn Foo /repo --include="*.scala"'), "session_id": sid}, fake_home)
     assert rc == 2
-    assert "ESCALATION" in err and "metals-direct" in err  # 2nd block: banner
+    assert "ESCALATION" in err and "scala-direct" in err  # 2nd block: banner
     # different session is unaffected
     rc, _, err = _run({**_bash('grep -rn Foo /repo --include="*.scala"'), "session_id": "other"}, fake_home)
     assert rc == 2 and "ESCALATION" not in err, err
@@ -530,7 +530,7 @@ def test_bump_block_count_and_banner(hook_module, tmp_path, monkeypatch):
     # ESCALATE_THRESHOLD = 2 (2026-05-15): banner fires AT count 2, not 3.
     assert hook_module._escalation_banner({"scala": 1}) == ""          # below threshold
     banner = hook_module._escalation_banner({"scala": 2, "python": 1})
-    assert "ESCALATION" in banner and "metals-direct" in banner
+    assert "ESCALATION" in banner and "scala-direct" in banner
     assert "py-direct" not in banner                                   # python under threshold
     assert json.loads(counts_file.read_text())["s"]["scala"] == 3
 

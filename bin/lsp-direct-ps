@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""lsp-direct-ps — list live LSP backends spawned by tool-server-proxy + scala-direct.
+
+Reads ~/.cache/claude-lsp-direct/registry.tsv, signal-0 probes each entry's PIDs,
+prints surviving lineages as TSV. Dead entries are pruned from output (but kept in
+the registry file — orphan-teardown ADR-004 leaves pruning to a periodic sweep).
+
+Columns: spawn_ts | wrapper | workspace | coord_pid | backend_pid | alive | age_minutes
+
+Modes:
+  lsp-direct-ps                    list all live entries
+  lsp-direct-ps --workspace <path> filter by workspace prefix match
+  lsp-direct-ps --wrapper <name>   filter by wrapper name (py-direct, scala-direct, ...)
+  lsp-direct-ps --json             emit JSON-array instead of TSV
+  lsp-direct-ps --all              include dead entries (default: live only)
+  lsp-direct-ps --prune            rewrite registry with only live entries (housekeeping)
+
+Per orphan-teardown ADR-004 / slice-3.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+REGISTRY = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "claude-lsp-direct" / "registry.tsv"
+
+EXPECTED_HEADER = ["spawn_ts", "coordinator_pid", "backend_pid", "wrapper", "workspace", "parent_pid"]
+
+
+def pid_alive(pid: int) -> bool:
+    """signal-0 liveness probe — same OS contract used by tool-server-proxy parent-watchdog."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # process exists but is owned by another user (rare for our own children)
+        return True
+
+
+def parse_rows(path: Path) -> list[dict]:
+    """parse registry TSV; tolerant of header drift + malformed rows."""
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    try:
+        with path.open() as f:
+            header = None
+            for ln in f:
+                ln = ln.rstrip("\n")
+                if not ln:
+                    continue
+                cols = ln.split("\t")
+                if header is None:
+                    # accept either canonical header or treat first line as data if it parses
+                    if cols == EXPECTED_HEADER:
+                        header = cols
+                        continue
+                    # no header — treat as data using EXPECTED_HEADER ordering
+                    header = EXPECTED_HEADER
+                if len(cols) != len(header):
+                    continue  # malformed row — skip
+                row = dict(zip(header, cols))
+                rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
+def annotate(row: dict) -> dict:
+    """add derived fields: alive (bool), age_minutes (int)."""
+    try:
+        coord = int(row.get("coordinator_pid", "0") or "0")
+        backend = int(row.get("backend_pid", "0") or "0")
+    except ValueError:
+        coord = backend = 0
+    coord_alive = pid_alive(coord)
+    backend_alive = pid_alive(backend)
+    try:
+        spawned_at = datetime.fromisoformat(row.get("spawn_ts", "").replace("Z", "+00:00"))
+        age_min = int((datetime.now(timezone.utc) - spawned_at).total_seconds() / 60)
+    except (ValueError, TypeError):
+        age_min = -1
+    row["coordinator_alive"] = coord_alive
+    row["backend_alive"] = backend_alive
+    row["alive"] = coord_alive or backend_alive
+    row["age_minutes"] = age_min
+    return row
+
+
+def filter_rows(rows: list[dict], workspace_prefix: str | None, wrapper: str | None, only_live: bool) -> list[dict]:
+    out = []
+    for r in rows:
+        if workspace_prefix and not r.get("workspace", "").startswith(workspace_prefix):
+            continue
+        if wrapper and r.get("wrapper", "") != wrapper:
+            continue
+        if only_live and not r.get("alive"):
+            continue
+        out.append(r)
+    return out
+
+
+def emit_tsv(rows: list[dict], out=sys.stdout) -> None:
+    cols = ["spawn_ts", "wrapper", "workspace", "coordinator_pid", "backend_pid", "alive", "age_minutes"]
+    out.write("\t".join(cols) + "\n")
+    for r in rows:
+        out.write("\t".join(str(r.get(c, "")) for c in cols) + "\n")
+
+
+def emit_json(rows: list[dict], out=sys.stdout) -> None:
+    json.dump(rows, out, indent=2, default=str)
+    out.write("\n")
+
+
+def prune(path: Path) -> int:
+    """rewrite registry with live entries only; returns removed count.
+    Atomic via temp-write + rename. NOT concurrent-safe across parallel prunes —
+    callers should serialize via lsp-direct-ps invocation (single-user solo-dev scope)."""
+    if not path.exists():
+        return 0
+    rows = [annotate(r) for r in parse_rows(path)]
+    live = [r for r in rows if r["alive"]]
+    removed = len(rows) - len(live)
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w") as f:
+        f.write("\t".join(EXPECTED_HEADER) + "\n")
+        for r in live:
+            f.write("\t".join(str(r.get(c, "")) for c in EXPECTED_HEADER) + "\n")
+    os.replace(tmp, path)
+    return removed
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--workspace", help="filter by workspace prefix match")
+    p.add_argument("--wrapper", help="filter by wrapper name (py-direct, scala-direct, ...)")
+    p.add_argument("--json", action="store_true", help="emit JSON-array instead of TSV")
+    p.add_argument("--all", action="store_true", help="include dead entries (default: live only)")
+    p.add_argument("--prune", action="store_true", help="rewrite registry with only live entries")
+    args = p.parse_args()
+
+    if args.prune:
+        removed = prune(REGISTRY)
+        print(f"pruned {removed} dead entries from {REGISTRY}", file=sys.stderr)
+        return 0
+
+    rows = [annotate(r) for r in parse_rows(REGISTRY)]
+    rows = filter_rows(rows, args.workspace, args.wrapper, only_live=not args.all)
+
+    if args.json:
+        emit_json(rows)
+    else:
+        emit_tsv(rows)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

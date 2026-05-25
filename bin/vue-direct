@@ -7,6 +7,18 @@ set -euo pipefail
 STATE_ROOT="${VUE_DIRECT_STATE:-$HOME/.cache/vue-direct}"
 COORDINATOR="$HOME/.claude/bin/vue-direct-coordinator.js"
 
+# shared cap-check helper — Layer B leak prevention
+# portable symlink-resolving source (readlink -f is GNU-only)
+__cap_src="${BASH_SOURCE[0]}"
+while [ -L "$__cap_src" ]; do
+  __cap_dir="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+  __cap_src="$(readlink "$__cap_src")"
+  case "$__cap_src" in /*) ;; *) __cap_src="$__cap_dir/$__cap_src" ;; esac
+done
+__CAP_BIN_DIR="$(cd -P "$(dirname "$__cap_src")" && pwd)"
+# shellcheck source=./lib/cap-check.sh
+. "$__CAP_BIN_DIR/lib/cap-check.sh"
+
 die() { echo "vue-direct: $*" >&2; exit 1; }
 
 # resolve workspace: arg > walk up for package.json > cwd
@@ -68,6 +80,7 @@ cmd_start() {
     return 0
   fi
   port="$(free_port)"
+  cap_check_and_evict "vue-direct" "$STATE_ROOT"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
   nohup node "$COORDINATOR" --tool-name vue-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
