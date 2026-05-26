@@ -174,64 +174,50 @@ def _strip_quoted(cmd: str) -> str:
 
 
 def lsp_suggestion(lang: str, avail: dict) -> Optional[str]:
-    """return enforcement message if LSP is ready; None if no enforcement applies"""
+    """return enforcement message if LSP is ready; None if no enforcement applies.
+    2026-05-26 W1 compression: emission compressed ~75% — method surface enumerated via
+    `<wrapper> tools`; agent knows JSON shapes via rules/lsp.md auto-load."""
     info = avail.get("lsps", {}).get(lang) or lang_info_fallback(lang)
     if not info:
         return None
     if lang == "scala":
         if info.get("binary") and info.get("backend"):
             return (
-                f"use metals-direct instead of grep on *.scala/*.sbt/*.sc:\n"
-                f"  ~/.claude/bin/metals-direct call glob-search '{{\"query\":\"<symbol>\",\"fileInFocus\":\"<abs-path>\"}}' {info.get('workspace','')}\n"
-                f"  ~/.claude/bin/metals-direct call get-usages '{{\"fqcn\":\"<fqcn>\",\"module\":\"<mod>\"}}' {info.get('workspace','')}\n"
-                f"  ~/.claude/bin/metals-direct tools   # list all metals-mcp operations\n"
-                f"grep remains valid for config/data files — NOT source code. state explicitly why metals-direct could not answer before falling back."
+                "use metals-direct on *.scala/*.sbt/*.sc; methods: glob-search | get-usages | "
+                "tools (~/.claude/bin/metals-direct tools for surface). grep valid for config/data only."
             )
-        # scala workspace but metals-direct/metals-mcp missing → warn not block
         missing = []
         if not info.get("binary"):
             missing.append("~/.claude/bin/metals-direct wrapper")
         if not info.get("backend"):
-            missing.append("metals-mcp binary (brew install metals or cs install metals-mcp)")
+            missing.append("metals-mcp binary")
         return f"[WARN not block] scala stack detected but missing: {', '.join(missing)}. grep allowed until installed."
     if lang == "vue":
         if info.get("binary") and info.get("backend"):
             return (
-                f"use vue-direct instead of grep on *.vue:\n"
-                f"  ~/.claude/bin/vue-direct call textDocument/documentSymbol '{{\"textDocument\":{{\"uri\":\"file://<abs-path>\"}}}}' {info.get('workspace','')}\n"
-                f"  ~/.claude/bin/vue-direct call textDocument/hover '{{\"textDocument\":{{\"uri\":\"file://<abs-path>\"}},\"position\":{{\"line\":N,\"character\":N}}}}' {info.get('workspace','')}\n"
-                f"  ~/.claude/bin/vue-direct tools   # list LSP method surface\n"
-                f"grep remains valid for non-source files (template html, config). state explicitly why vue-direct could not answer before falling back."
+                "use vue-direct on *.vue; methods: documentSymbol | hover | references "
+                "(~/.claude/bin/vue-direct tools for surface). grep valid for html templates + config only."
             )
         missing = []
         if not info.get("binary"):
             missing.append("~/.claude/bin/vue-direct wrapper")
         if not info.get("backend"):
-            missing.append("vue-language-server on PATH ('npm i -g @vue/language-server@3.2.6 @vue/typescript-plugin@3.2.6 typescript@5.9.3')")
+            missing.append("vue-language-server on PATH")
         return f"[WARN not block] vue stack detected but missing: {', '.join(missing)}. grep allowed until installed."
     if lang in {"python", "typescript", "csharp", "java"}:
-        # primary path after migration: direct wrapper (py-direct/ts-direct/cs-direct)
         wrapper_name, backend_bin = LANG_DIRECT_WRAPPER[lang]
         if info.get("tool") == wrapper_name and info.get("binary") and info.get("backend"):
             return (
-                f"use {wrapper_name} instead of grep on source files:\n"
-                f"  ~/.claude/bin/{wrapper_name} call textDocument/documentSymbol '{{\"textDocument\":{{\"uri\":\"file://<abs-path>\"}}}}'\n"
-                f"  ~/.claude/bin/{wrapper_name} call textDocument/references '{{\"textDocument\":{{\"uri\":\"file://<abs-path>\"}},\"position\":{{\"line\":N,\"character\":N}},\"context\":{{\"includeDeclaration\":true}}}}'\n"
-                f"  ~/.claude/bin/{wrapper_name} call workspace/symbol '{{\"query\":\"<name>\"}}'\n"
-                f"  ~/.claude/bin/{wrapper_name} tools   # list LSP method surface\n"
-                f"grep remains valid for non-source files (config, markdown, data)."
+                f"use {wrapper_name} on source; methods: documentSymbol | references | "
+                f"workspace/symbol (~/.claude/bin/{wrapper_name} tools for surface). "
+                f"grep valid for non-source only."
             )
-        # fallback: native LSP plugin active
         if info.get("plugin_installed") and info.get("binary_on_path"):
             return (
-                f"use the LSP tool for {lang} instead of grep (direct wrapper absent):\n"
-                f"  LSP(operation=\"workspaceSymbol\", ...)\n"
-                f"  LSP(operation=\"findReferences\", filePath=<path>, line=N, character=N)\n"
-                f"  LSP(operation=\"goToDefinition\", filePath=<path>, line=N, character=N)\n"
-                f"prefer ~/.claude/bin/{wrapper_name} when available (~100× faster per rules/lsp.md § lsp-workarounds).\n"
-                f"grep remains valid for non-source files."
+                f"use LSP tool for {lang} (direct wrapper absent): workspaceSymbol | "
+                f"findReferences | goToDefinition. prefer {wrapper_name} when available "
+                f"(~100× faster). grep valid for non-source only."
             )
-        # neither direct wrapper nor plugin available → warn not block
         missing = []
         if not info.get("plugin_installed") and info.get("tool") != wrapper_name:
             missing.append(f"{wrapper_name} wrapper or {lang}-lsp plugin")
@@ -357,15 +343,11 @@ def main() -> None:
         if is_unscoped_recursive_grep(cmd):
             sys.stderr.write(
                 "BLOCKED by enforce-lsp-over-grep: unscoped recursive grep/rg\n"
-                "philosophy: LSP for all source-code questions (see lib/rules-on-demand/lsp.md § philosophy). "
-                "recursive grep/rg without --include/--type/-g has ambiguous intent — hook cannot tell if target "
-                "tree contains source code, so defaults to MANDATORY-LSP rule.\n"
-                f"Bash: {cmd[:300]}{'...' if len(cmd) > 300 else ''}\n\n"
+                f"Bash: {cmd[:200]}{'...' if len(cmd) > 200 else ''}\n"
                 "resolve by declaring intent:\n"
-                "  - targeting source code → use the appropriate <lang>-direct wrapper "
-                "(metals-direct/vue-direct/py-direct/ts-direct/cs-direct/java-direct)\n"
-                "  - targeting non-source files → add --include='*.<ext>' (e.g. *.sql, *.md, *.properties) or -g '*.<ext>' for rg\n"
-                "  - scoped to a known non-code subtree → recurse inside conf/, docs/, .claude/, i18n/, etc. explicitly\n"
+                "  - source code → <lang>-direct wrapper (metals/vue/py/ts/cs/java)\n"
+                "  - non-source files → add --include='*.<ext>' OR rg -g '*.<ext>'\n"
+                "  - non-code subtree → recurse inside conf/ docs/ .claude/ i18n/ explicitly\n"
             )
             _log_block(payload, tool_name, cmd, "unscoped_recursive_grep_bash")
             sys.exit(2)
@@ -394,12 +376,9 @@ def main() -> None:
     if not msgs:
         sys.exit(0)
     header = (
-        "BLOCKED by enforce-lsp-over-grep: use semantic LSP tools on source code\n"
-        "philosophy: LSP for all languages. grep/rg/find on code is lossy; misses renames, respects no semantics.\n"
-        f"{source}\n\n"
+        f"BLOCKED by enforce-lsp-over-grep: use semantic LSP tools on source code\n{source}\n\n"
     ) if block else (
-        "WARN from enforce-lsp-over-grep: LSP setup incomplete\n"
-        f"{source}\n\n"
+        f"WARN from enforce-lsp-over-grep: LSP setup incomplete\n{source}\n\n"
     )
     sys.stderr.write(header + "\n\n".join(msgs) + "\n")
     if block:
