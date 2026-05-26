@@ -5,6 +5,8 @@ set -euo pipefail
 
 STATE_ROOT="${PY_DIRECT_STATE:-$HOME/.cache/py-direct}"
 PROXY="$HOME/.claude/bin/lsp-stdio-proxy.js"
+# shellcheck source=/dev/null
+. "$(dirname "$PROXY")/lib/find-claude-pid.sh"
 LSP_BIN="pyright-langserver"
 LSP_ARGS=(--stdio)
 LANG_ID="python"
@@ -61,7 +63,8 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$PROXY" --tool-name py-direct --workspace "$ws" --port "$port" --lang-id "$LANG_ID" -- "$LSP_BIN" "${LSP_ARGS[@]}" >"$dir/log" 2>&1 &
+  local parent_pid; parent_pid="$(find_claude_pid 2>/dev/null || echo "$PPID")"
+  nohup node "$PROXY" --tool-name py-direct --workspace "$ws" --port "$port" --parent-pid "$parent_pid" --lang-id "$LANG_ID" -- "$LSP_BIN" "${LSP_ARGS[@]}" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   local i=0

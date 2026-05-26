@@ -6,6 +6,8 @@ set -euo pipefail
 
 STATE_ROOT="${VUE_DIRECT_STATE:-$HOME/.cache/vue-direct}"
 COORDINATOR="$HOME/.claude/bin/vue-direct-coordinator.js"
+# shellcheck source=/dev/null
+. "$(dirname "$COORDINATOR")/lib/find-claude-pid.sh"
 
 die() { echo "vue-direct: $*" >&2; exit 1; }
 
@@ -70,7 +72,8 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$COORDINATOR" --tool-name vue-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
+  local parent_pid; parent_pid="$(find_claude_pid 2>/dev/null || echo "$PPID")"
+  nohup node "$COORDINATOR" --tool-name vue-direct --workspace "$ws" --port "$port" --parent-pid "$parent_pid" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   local i=0

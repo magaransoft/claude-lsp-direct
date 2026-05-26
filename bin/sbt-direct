@@ -7,6 +7,8 @@ set -euo pipefail
 
 STATE_ROOT="${SBT_DIRECT_STATE:-$HOME/.cache/sbt-direct}"
 COORDINATOR="$HOME/.claude/bin/sbt-direct-coordinator.js"
+# shellcheck source=/dev/null
+. "$(dirname "$COORDINATOR")/lib/find-claude-pid.sh"
 WORKSPACE_MARKERS=(build.sbt build.sc build.mill project/build.properties)
 # SBT_DIRECT_MODE=auto (default) | bsp | oneshot
 #   auto: coordinator probes <workspace>/.bsp/sbt.json. If present → bsp
@@ -69,7 +71,8 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$COORDINATOR" --tool-name sbt-direct --mode "$SBT_MODE" --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
+  local parent_pid; parent_pid="$(find_claude_pid 2>/dev/null || echo "$PPID")"
+  nohup node "$COORDINATOR" --tool-name sbt-direct --mode "$SBT_MODE" --workspace "$ws" --port "$port" --parent-pid "$parent_pid" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   # bsp + auto modes wait for sbt JVM boot + BSP initialize (15-30s

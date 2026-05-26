@@ -6,6 +6,8 @@ set -euo pipefail
 
 STATE_ROOT="${PRETTIER_DIRECT_STATE:-$HOME/.cache/prettier-direct}"
 DAEMON="$HOME/.claude/bin/prettier-direct-daemon.js"
+# shellcheck source=/dev/null
+. "$(dirname "$DAEMON")/lib/find-claude-pid.sh"
 WORKSPACE_MARKERS=(.prettierrc .prettierrc.json .prettierrc.js .prettierrc.cjs .prettierrc.mjs prettier.config.js prettier.config.cjs prettier.config.mjs package.json)
 
 die() { echo "prettier-direct: $*" >&2; exit 1; }
@@ -60,7 +62,8 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$DAEMON" --tool-name prettier-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
+  local parent_pid; parent_pid="$(find_claude_pid 2>/dev/null || echo "$PPID")"
+  nohup node "$DAEMON" --tool-name prettier-direct --workspace "$ws" --port "$port" --parent-pid "$parent_pid" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   local i=0

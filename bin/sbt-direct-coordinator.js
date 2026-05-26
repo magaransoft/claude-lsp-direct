@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 
 const { createProxy } = require('./tool-server-proxy.js');
+const { installParentWatchdog, parseParentPidArg } = require('./lib/parent-watchdog.js');
 
 function arg(name, def) {
   const i = process.argv.indexOf('--' + name);
@@ -46,6 +47,8 @@ const { createAdapter } = require(adapterModule);
 console.error(`[sbt-direct] mode=${MODE}`);
 
 if (!fs.existsSync(WORKSPACE)) die(`workspace does not exist: ${WORKSPACE}`);
+
+installParentWatchdog({ parentPid: parseParentPidArg(process.argv), toolName: TOOL_NAME });
 
 const adapterOpts = MODE === 'bsp'
   ? { name: TOOL_NAME }
