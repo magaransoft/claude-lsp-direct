@@ -26,7 +26,7 @@ function langIdForExt(ext, fallback) {
   }
 }
 
-// createAdapter({ name, cmd, args, langId, markers, triggers, didChangeConfigurationSupported })
+// createAdapter({ name, cmd, args, langId, markers, triggers, didChangeConfigurationSupported, serverRequestHandlers, serverRequestDefault })
 //   name         — adapter.name (matches wrapper name, e.g. 'py-direct')
 //   cmd, args    — LSP server executable + args
 //   langId       — default LSP languageId (e.g. 'python')
@@ -34,16 +34,24 @@ function langIdForExt(ext, fallback) {
 //   triggers     — { soft: [...], hard: [...] } invalidation matrix
 //   didChangeConfigurationSupported — bool; false → soft trigger falls
 //                  back to hard restart
+//   serverRequestHandlers — OPTIONAL { [childId]: { [method]: (params, ctx) => result } }
+//                  per roslyn-reverse-rpc-lsp-stdio ADR-001; absent → harness default applies
+//   serverRequestDefault  — OPTIONAL 'null-ack' | 'method-class-aware'
+//                  per ADR-002/003; absent → harness 'null-ack' (back-compat for py/ts/cs/java/vue)
 function createAdapter({
   name, cmd, args, langId, markers,
   triggers = { soft: [], hard: [] },
   didChangeConfigurationSupported = true,
+  serverRequestHandlers,
+  serverRequestDefault,
 }) {
   return {
     name,
     markers,
     triggers,
     didChangeConfigurationSupported,
+    serverRequestHandlers,
+    serverRequestDefault,
 
     spawn(workspace) {
       return [{

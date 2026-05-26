@@ -64,13 +64,47 @@ function createAdapter({
           const formatted = await prettier.format(source, { ...(config || {}), filepath: p.filepath });
           return { filepath: p.filepath, formatted, changed: formatted !== source };
         }
+        case 'format-files': {
+          // parity with adapters/scalafmt-cli.js § format-files + adapters/eslint.js § lint-files
+          // returns per-file envelope so one bad path NEVER poisons siblings (mirrors /batch shape)
+          if (!Array.isArray(p.files) || p.files.length === 0) {
+            throw new Error('prettier.format-files requires params.files (non-empty array of abs paths)');
+          }
+          const results = await Promise.all(p.files.map(async (filepath) => {
+            try {
+              const source = fs.readFileSync(filepath, 'utf8');
+              const config = await prettier.resolveConfig(filepath);
+              const formatted = await prettier.format(source, { ...(config || {}), filepath });
+              return { ok: true, filepath, formatted, changed: formatted !== source };
+            } catch (e) {
+              return { ok: false, filepath, error: e.message };
+            }
+          }));
+          return { results };
+        }
+        case 'check-files': {
+          if (!Array.isArray(p.files) || p.files.length === 0) {
+            throw new Error('prettier.check-files requires params.files (non-empty array of abs paths)');
+          }
+          const results = await Promise.all(p.files.map(async (filepath) => {
+            try {
+              const source = fs.readFileSync(filepath, 'utf8');
+              const config = await prettier.resolveConfig(filepath);
+              const matches = await prettier.check(source, { ...(config || {}), filepath });
+              return { ok: true, filepath, matches };
+            } catch (e) {
+              return { ok: false, filepath, error: e.message };
+            }
+          }));
+          return { results };
+        }
         case 'resolve-config': {
           if (typeof p.filepath !== 'string') throw new Error('prettier.resolve-config requires params.filepath (string)');
           const config = await prettier.resolveConfig(p.filepath);
           return { config };
         }
         default:
-          throw new Error(`unknown prettier method: ${method} — supported: version, format, check, format-file, resolve-config`);
+          throw new Error(`unknown prettier method: ${method} — supported: version, format, check, format-file, format-files, check-files, resolve-config`);
       }
     },
 

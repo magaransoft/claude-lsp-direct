@@ -28,7 +28,19 @@ py-direct call textDocument/hover \
     "position":{"line":10,"character":5}}'
 
 py-direct call workspace/symbol '{"query":"UserModel"}'
+
+# multi-file fan-out (1 HTTP roundtrip + 1 tool_result for N files)
+py-direct batch textDocument/documentSymbol \
+  /abs/path/to/A.py /abs/path/to/B.py /abs/path/to/C.py
+
+# raw multi-call (mixed methods)
+py-direct batch-json '[
+  {"method":"workspace/symbol","params":{"query":"UserModel"}},
+  {"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///abs/x.py"},"position":{"line":0,"character":0}}}
+]'
 ```
+
+When querying >=2 files with the same method, callers MUST use `batch` (or `batch-json`) — the `enforce-batch-on-direct-call.py` PreToolUse hook blocks 2nd same-method `call` within 60s. Per-call envelope `{ok:true,value}|{ok:false,error}` returned per sub-call so one bad uri NEVER poisons siblings.
 
 ## Op surface
 Standard LSP 3.17 methods pyright implements:

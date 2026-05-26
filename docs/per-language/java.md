@@ -32,7 +32,19 @@ java-direct call textDocument/hover \
     "position":{"line":10,"character":5}}'
 
 java-direct call workspace/symbol '{"query":"UserService"}'
+
+# multi-file fan-out (1 HTTP roundtrip + 1 tool_result for N files)
+java-direct batch textDocument/documentSymbol \
+  /abs/path/to/A.java /abs/path/to/B.java /abs/path/to/C.java
+
+# raw multi-call (mixed methods)
+java-direct batch-json '[
+  {"method":"workspace/symbol","params":{"query":"UserService"}},
+  {"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///abs/x.java"},"position":{"line":0,"character":0}}}
+]'
 ```
+
+When querying >=2 files with the same method, callers MUST use `batch` (or `batch-json`) — the `enforce-batch-on-direct-call.py` PreToolUse hook blocks 2nd same-method `call` within 60s. Per-call envelope `{ok:true,value}|{ok:false,error}` returned per sub-call so one bad uri NEVER poisons siblings.
 
 ## Op surface
 Standard LSP 3.17 methods jdtls implements:

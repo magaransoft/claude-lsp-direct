@@ -24,7 +24,19 @@ ts-direct call textDocument/references \
     "context":{"includeDeclaration":true}}'
 
 ts-direct call workspace/symbol '{"query":"UserStore"}'
+
+# multi-file fan-out (1 HTTP roundtrip + 1 tool_result for N files)
+ts-direct batch textDocument/documentSymbol \
+  /abs/path/to/A.ts /abs/path/to/B.ts /abs/path/to/C.ts
+
+# raw multi-call (mixed methods)
+ts-direct batch-json '[
+  {"method":"workspace/symbol","params":{"query":"UserStore"}},
+  {"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///abs/x.ts"},"position":{"line":0,"character":0}}}
+]'
 ```
+
+When querying >=2 files with the same method, callers MUST use `batch` (or `batch-json`) — the `enforce-batch-on-direct-call.py` PreToolUse hook blocks 2nd same-method `call` within 60s. Per-call envelope `{ok:true,value}|{ok:false,error}` returned per sub-call so one bad uri NEVER poisons siblings.
 
 ## Op surface
 Every standard LSP 3.17 method typescript-language-server implements, plus tsserver-specific commands via `workspace/executeCommand`.

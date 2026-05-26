@@ -90,6 +90,21 @@ cmd_call() {
   echo
 }
 
+cmd_batch_json() {
+  local calls_json="${1-}"; shift || true
+  [ -z "$calls_json" ] && die "usage: prettier-direct batch-json '<json-array of {method,params}>' [workspace]"
+  local ws dir port payload
+  ws="$(resolve_workspace "${1:-}")"
+  dir="$(state_dir "$ws")"
+  server_alive "$dir" || { echo "daemon not running for $ws — starting..." >&2; cmd_start "$ws" >&2; }
+  port="$(state_get "$dir" port)"
+  payload="$(jq -cn --argjson calls "$calls_json" '{calls:$calls}')"
+  curl -fsS -m 600 "http://localhost:$port/batch" -X POST \
+    -H 'Content-Type: application/json' \
+    -d "$payload" || die "batch-json failed — verify daemon health via '$0 status'"
+  echo
+}
+
 cmd_tools() {
   cat <<EOF
 prettier-direct methods (in-process prettier — warm calls <50ms):
@@ -102,12 +117,23 @@ prettier-direct methods (in-process prettier — warm calls <50ms):
                  params: { source: "<code>", filepath?: "<path>", options?: {...} }
   format-file    read file, prettier.resolveConfig, prettier.format; returns {changed, formatted}
                  params: { filepath: "<abs-path>" }
+  format-files   loop format-file across multiple paths in one call (in-process)
+                 params: { files: ["<abs-path>", ...] }
+                 returns: { results: [{ok:true,filepath,formatted,changed}|{ok:false,filepath,error}] }
+  check-files    loop check across multiple paths in one call (in-process)
+                 params: { files: ["<abs-path>", ...] }
+                 returns: { results: [{ok:true,filepath,matches}|{ok:false,filepath,error}] }
   resolve-config prettier.resolveConfig(filepath)
                  params: { filepath: "<abs-path>" }
 
 invoke:
   prettier-direct call format-file '{"filepath":"/abs/path/file.ts"}'
   prettier-direct call format '{"source":"const x=1","filepath":"x.ts"}'
+
+batch (multi-call fan-out — for multi-file format/check, prefer Wave-C format-files/check-files when available):
+  prettier-direct batch-json '[{"method":"format-file","params":{"filepath":"/abs/A.ts"}},{"method":"format-file","params":{"filepath":"/abs/B.ts"}}]' [ws]
+
+batch return shape: {results:[{ok:true,value}|{ok:false,error}]} per sub-call — one bad path NEVER poisons siblings.
 EOF
 }
 
@@ -142,11 +168,12 @@ cmd_status() {
 }
 
 case "${1:-}" in
-  start)  shift; cmd_start "$@" ;;
-  call)   shift; cmd_call "$@" ;;
-  tools)  shift; cmd_tools "$@" ;;
-  stop)   shift; cmd_stop "$@" ;;
-  status) shift; cmd_status "$@" ;;
+  start)      shift; cmd_start "$@" ;;
+  call)       shift; cmd_call "$@" ;;
+  batch-json) shift; cmd_batch_json "$@" ;;
+  tools)      shift; cmd_tools "$@" ;;
+  stop)       shift; cmd_stop "$@" ;;
+  status)     shift; cmd_status "$@" ;;
   ""|-h|--help)
     cat <<EOF
 prettier-direct — per-workspace prettier daemon
@@ -154,6 +181,7 @@ prettier-direct — per-workspace prettier daemon
 usage:
   prettier-direct start [workspace]
   prettier-direct call <method> '<json-params>' [workspace]
+  prettier-direct batch-json '<json-array>' [workspace]   # multi-method fan-out
   prettier-direct tools
   prettier-direct stop [workspace]
   prettier-direct status

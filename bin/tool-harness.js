@@ -51,10 +51,12 @@ function freePort() {
   });
 }
 
-// serveHttp — loopback HTTP server exposing GET /health and POST
-// /call (canonical) + POST /lsp (back-compat alias for existing
-// wrappers). The caller supplies onCall({method, params}) → Promise<any>.
-function serveHttp(port, { onCall, meta, statusFn }) {
+// serveHttp — loopback HTTP server exposing GET /health, POST /call
+// (canonical) + POST /lsp (back-compat alias), and POST /batch
+// (multi-call fan-out). The caller supplies onCall({method, params})
+// → Promise<any>; optionally onBatch({calls}) → Promise<results[]>
+// where each result is {ok:true, value} | {ok:false, error}.
+function serveHttp(port, { onCall, onBatch, meta, statusFn }) {
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
       let extra = {};
@@ -85,6 +87,46 @@ function serveHttp(port, { onCall, meta, statusFn }) {
           const result = await onCall({ method, params: params || {} });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ result }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/batch') {
+      if (typeof onBatch !== 'function') {
+        res.writeHead(501, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'batch not supported by this coordinator' }));
+        return;
+      }
+      let body = '';
+      req.on('data', c => { body += c.toString('utf8'); });
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body); } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid JSON: ' + e.message }));
+          return;
+        }
+        const { calls } = payload;
+        if (!Array.isArray(calls) || calls.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'empty calls' }));
+          return;
+        }
+        for (let i = 0; i < calls.length; i++) {
+          const c = calls[i];
+          if (!c || typeof c !== 'object' || !c.method) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `calls[${i}] missing method` }));
+            return;
+          }
+        }
+        try {
+          const results = await onBatch({ calls });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ results }));
         } catch (e) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: e.message }));
@@ -256,6 +298,17 @@ const framing = {
     },
   },
 
+  // noop — no stdio framing. Use for child processes that own their
+  // own RPC channel (HTTP / unix socket / MCP) and whose stdout/stderr
+  // are diagnostic-only. The coordinator still spawns the child with
+  // detached:true (for process-group kill) but never reads its stdio.
+  // Used by adapters/metals-mcp.js since metals-mcp speaks HTTP-MCP
+  // not stdio-JSON-RPC. Per orphan-teardown ADR-003.
+  noop: {
+    reader() { return function onData() { /* drop all bytes */ }; },
+    writer() { return function send() { /* never sent */ }; },
+  },
+
   // tsserverMixed — tsserver emits either Content-Length-framed or
   // plain \n-delimited JSON. Shape matches the vue coordinator's
   // handling; used in wave 2 step 5.
@@ -296,11 +349,20 @@ const framing = {
 
 // jsonRpcClient — correlation helper for JSON-RPC 2.0 stdio peers
 // (LSP, sbt thin client). Call handleMessage(msg) from the framer's
-// onMessage callback. Provides request/notify + null-ack for
-// server-initiated requests by default.
-function jsonRpcClient({ send, onServerRequest, onNotification, onResponseError }) {
+// onMessage callback. Provides request/notify + per-adapter reverse-RPC
+// dispatch for server-initiated requests.
+//
+// reverse-RPC dispatch precedence (roslyn-reverse-rpc-lsp-stdio ADR-001/002/003):
+//   serverRequestHandlers[method](params, ctx)  // per-method handler — try/catch → -32603 on throw
+//   onServerRequest(msg, sendResult)            // legacy callback — try/catch → -32603 on throw
+//   serverRequestDefault === 'method-class-aware'  // → -32601 Method not found
+//   default 'null-ack'                          // → { result: null }  (back-compat preserved)
+function jsonRpcClient({ send, onServerRequest, onNotification, onResponseError, serverRequestHandlers, serverRequestDefault = 'null-ack', ctx }) {
   const pending = new Map();
   let nextId = 0;
+  // counter for -32601 responses emitted under method-class-aware default
+  // (roslyn-reverse-rpc Slice 3 observability — surfaced via statusFn).
+  let unknownServerRequests = 0;
   return {
     request(method, params) {
       return new Promise((resolve, reject) => {
@@ -328,8 +390,23 @@ function jsonRpcClient({ send, onServerRequest, onNotification, onResponseError 
         return;
       }
       if (msg.method && msg.id !== undefined) {
-        if (onServerRequest) {
-          onServerRequest(msg, (result) => send({ jsonrpc: '2.0', id: msg.id, result }));
+        const handler = serverRequestHandlers && serverRequestHandlers[msg.method];
+        if (handler) {
+          try {
+            const result = handler(msg.params, ctx);
+            send({ jsonrpc: '2.0', id: msg.id, result });
+          } catch (e) {
+            send({ jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: 'Internal error: ' + e.message } });
+          }
+        } else if (onServerRequest) {
+          try {
+            onServerRequest(msg, (result) => send({ jsonrpc: '2.0', id: msg.id, result }));
+          } catch (e) {
+            send({ jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: 'Internal error: ' + e.message } });
+          }
+        } else if (serverRequestDefault === 'method-class-aware') {
+          unknownServerRequests++;
+          send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found: ' + msg.method } });
         } else {
           send({ jsonrpc: '2.0', id: msg.id, result: null });
         }
@@ -340,6 +417,7 @@ function jsonRpcClient({ send, onServerRequest, onNotification, onResponseError 
       }
     },
     pendingCount: () => pending.size,
+    unknownServerRequests: () => unknownServerRequests,
   };
 }
 

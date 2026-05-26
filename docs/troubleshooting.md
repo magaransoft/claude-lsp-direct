@@ -95,7 +95,7 @@ py-direct call textDocument/hover '{...}' /abs/path/to/project
 **Fix:** Run `<wrapper> prune`. Reaps state dirs whose recorded process is dead AND whose port is unreachable. Adopted external servers (running but launched by an IDE) and live-launched servers are preserved.
 
 ```bash
-metals-direct prune  # pruned 17 dead state dir(s) from /Users/me/.cache/metals-direct
+scala-direct prune  # pruned 17 dead state dir(s) from /Users/me/.cache/scala-direct
 ts-direct prune
 py-direct prune
 # … same subcommand on all wrappers

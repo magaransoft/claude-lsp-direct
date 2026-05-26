@@ -58,16 +58,20 @@ resolveWorkspace(markers, argv) → absPath
 
 stateDir(workspace, toolName) → path
   — ~/.cache/<toolName>-direct/<shasum12(absPath)>/. Same layout
-    metals-direct and the current coordinators already use.
+    scala-direct and the current coordinators already use.
 
 adoptOrSpawn({probe, spawn, stateDir}) → { children, adopted, cleanup }
   — probe() returns non-null if an external server for this workspace is
     already running (from an IDE, a prior session, etc.); if so, connect
     instead of spawning. spawn() otherwise creates new children.
 
-serveHttp(port, onCall) → { listen, close }
-  — loopback HTTP server with GET /health and POST /call { method, params }.
-    onCall is adapter-provided.
+serveHttp(port, { onCall, onBatch, meta, statusFn }) → { listen, close }
+  — loopback HTTP server with GET /health, POST /call { method, params },
+    POST /lsp { method, params } (back-compat alias), and POST /batch
+    { calls: [{ method, params }, ...] }. onCall + onBatch are adapter-
+    provided. /batch returns 501 when onBatch is not supplied; 400 on
+    empty calls or missing per-entry method; otherwise 200 with
+    { results: [{ ok:true, value }|{ ok:false, error }] } per sub-call.
 
 invalidationLoop({ stateDir, softTriggers, hardTriggers, onSoft, onHard })
   — stat()s trigger files on every /call. mtime past stored baseline:
@@ -85,6 +89,23 @@ framing: { contentLength, jsonLine, tsserverMixed }
 ```
 
 The harness is pure mechanism — no policy. Adapters decide which primitives they compose.
+
+## Batch surface (`POST /batch`)
+
+The `/batch` endpoint accepts `{ calls: [{ method, params }, ...] }` and fans out across `adapter.call` concurrently via `Promise.all` with per-sub-call try/catch envelope. Invariants:
+
+- **once-per-batch invalidation.** `invalidator.check()` runs exactly once at batch entry, not per sub-call. A soft/hard trigger fired during a batch reloads or restarts before any sub-call dispatches; subsequent sub-calls in the same batch see the post-reload state.
+- **per-call success isolation.** Each sub-call returns `{ ok:true, value }` or `{ ok:false, error }`. One failed sub-call NEVER poisons siblings — the array is always length-N for an N-element input.
+- **per-sub-call telemetry.** `callLog` emits one line per sub-call (not one per batch) so `confidence_report.py` and shadow-promotion analytics keep per-method granularity.
+- **unbounded concurrency.** `Promise.all` over `calls.map(adapter.call)` — LSP children handle concurrent JSON-RPC IDs natively via `jsonRpcClient` pending-map; node-formatter daemons (prettier/eslint) parallelize sync calls. Backpressure is the LSP child's responsibility, not the coordinator's.
+- **shared workspace.** All sub-calls in one batch share one workspace and one coordinator slot — cross-workspace batching is unsupported (would require per-call workspace resolution, out of scope).
+- **empty input → 400.** `{ calls: [] }` returns HTTP 400 `{ error: "empty calls" }`. Coordinators without `onBatch` wired return HTTP 501.
+
+The bash wrappers expose two CLI surfaces over `/batch`:
+- `<wrapper>-direct batch <method> <abs-file>...` — LSP convenience for textDocument/* methods. Builds `{ textDocument: { uri: "file://<abs>" } }` per file. Workspace derived from `dirname` of first file (per-call workspace anchor — never `$PWD`).
+- `<wrapper>-direct batch-json '<json-array>' [workspace]` — raw passthrough; works for any verb shape.
+
+LSP wrappers (ts/py/cs/java/vue) expose both. Non-LSP wrappers (prettier/eslint/scalafmt/sbt/dotnet) expose `batch-json` only; their verbs are project-grain or pattern-grain, not file-grain. scala-direct is excluded entirely — it speaks MCP, not the harness `/batch` surface.
 
 ## Server-proxy module (`bin/tool-server-proxy.js`)
 
@@ -249,7 +270,7 @@ Trigger sets are adapter-declared; see per-language docs.
 | cs-direct | tool-server-proxy | adapters/lsp-stdio.js | csharp-ls |
 | java-direct | tool-server-proxy | adapters/lsp-stdio.js | jdtls |
 | vue-direct | tool-server-proxy | adapters/vue-hybrid.js | vue-language-server + tsserver |
-| metals-direct | (independent MCP HTTP client) | — | metals-mcp |
+| scala-direct | (independent MCP HTTP client) | — | metals-mcp |
 | sbt-direct | tool-server-proxy | adapters/sbt-thin-client.js | sbt thin client (ipcsocket) |
 | dotnet-direct | tool-server-proxy | adapters/dotnet-build-server.js | dotnet build-server |
 | prettier-direct | node-formatter-daemon | adapters/prettier.js | prettier (in-process) |

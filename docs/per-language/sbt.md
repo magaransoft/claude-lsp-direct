@@ -85,7 +85,15 @@ sbt-direct call task    '{"task":"assembly"}'
 sbt-direct call reload  '{}'
 sbt-direct call version '{}'
 sbt-direct tools                                  # full surface
+
+# multi-task fan-out (1 HTTP roundtrip + 1 tool_result)
+sbt-direct batch-json '[
+  {"method":"task","params":{"task":"compile"}},
+  {"method":"task","params":{"task":"test"}}
+]'
 ```
+
+sbt verbs are project-grain (no per-file batch convenience). Use `batch-json` for multi-task fan-out — `enforce-batch-on-direct-call.py` PreToolUse hook blocks 2nd same-method `call` within 60s. Per-task envelope `{ok:true,value}|{ok:false,error}` so one failed task NEVER poisons siblings. Note: in oneshot mode each sub-task spawns its own `sbt` JVM; in bsp mode all sub-tasks ride one persistent BSP server. Cost is dominated by the worst-case sub-task duration since `Promise.all` runs them concurrently against the LSP child.
 
 ## Method surface
 
@@ -120,8 +128,11 @@ Omit `target` to apply to all build targets. Compile returns BSP
 
 ## Timing
 
-Each `call` spawns a fresh sbt subprocess. Cold-start costs:
+**BSP mode** (default when `.bsp/sbt.json` present):
+- Cold (JVM boot + BSP init): 15-30s on a warm Ivy cache; 30-120s genuine from-scratch.
+- Warm: ~130ms per call (persistent JVM; measured against fixture project, N=3 consecutive calls at 159/196/138ms).
 
+**Oneshot mode** (fallback when `.bsp/sbt.json` absent): each `call` spawns a fresh sbt subprocess.
 - first run on a fresh checkout: 30-120s (Ivy/Coursier resolution + Bloop generation on first compile).
 - subsequent runs: 15-40s (JVM boot + sbt init + task execution).
 

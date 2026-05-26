@@ -111,6 +111,76 @@ test('serveHttp — /health and /call', async () => {
   await new Promise(r => server.close(r));
 });
 
+test('serveHttp — /batch route validates payload + dispatches to onBatch', async () => {
+  const port = await freePort();
+  const http = require('http');
+  let lastBatchCalls = null;
+  const server = serveHttp(port, {
+    meta: {},
+    onCall: async () => ({ ok: true }),
+    onBatch: async ({ calls }) => {
+      lastBatchCalls = calls;
+      return calls.map(c => ({ ok: true, value: { echoed: c.method } }));
+    },
+  });
+  await new Promise(r => server.listen(r));
+
+  function post(pathname, body) {
+    return new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: pathname, method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+        let b = ''; res.on('data', c => b += c); res.on('end', () => resolve({ status: res.statusCode, body: b ? JSON.parse(b) : {} }));
+      });
+      req.on('error', reject);
+      req.end(JSON.stringify(body));
+    });
+  }
+
+  // empty calls → 400
+  const empty = await post('/batch', { calls: [] });
+  assert.strictEqual(empty.status, 400);
+  assert.strictEqual(empty.body.error, 'empty calls');
+
+  // missing calls field → 400
+  const missing = await post('/batch', {});
+  assert.strictEqual(missing.status, 400);
+
+  // sub-call missing method → 400
+  const badEntry = await post('/batch', { calls: [{ method: 'a' }, { params: {} }] });
+  assert.strictEqual(badEntry.status, 400);
+  assert.match(badEntry.body.error, /calls\[1\]/);
+
+  // happy path — 200 + results array
+  const ok = await post('/batch', { calls: [{ method: 'ping' }, { method: 'pong', params: { x: 1 } }] });
+  assert.strictEqual(ok.status, 200);
+  assert.strictEqual(ok.body.results.length, 2);
+  assert.deepStrictEqual(ok.body.results[0], { ok: true, value: { echoed: 'ping' } });
+  assert.deepStrictEqual(lastBatchCalls, [{ method: 'ping' }, { method: 'pong', params: { x: 1 } }]);
+
+  await new Promise(r => server.close(r));
+});
+
+test('serveHttp — /batch returns 501 when onBatch absent', async () => {
+  const port = await freePort();
+  const http = require('http');
+  const server = serveHttp(port, {
+    meta: {},
+    onCall: async () => ({ ok: true }),
+  });
+  await new Promise(r => server.listen(r));
+
+  const resp = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: '/batch', method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+      let b = ''; res.on('data', c => b += c); res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(b) }));
+    });
+    req.on('error', reject);
+    req.end(JSON.stringify({ calls: [{ method: 'x' }] }));
+  });
+  assert.strictEqual(resp.status, 501);
+  assert.match(resp.body.error, /not supported/);
+
+  await new Promise(r => server.close(r));
+});
+
 test('invalidationLoop — first check seeds, no fire', async () => {
   const d = tmp();
   const trigger = path.join(d, 'config.json');

@@ -38,7 +38,15 @@ scalafmt-direct call version      '{}'
 scalafmt-direct call format-stdin '{"source":"object A{}","filepath":"A.scala"}'
 scalafmt-direct call format-files '{"files":["src/main/scala/A.scala","src/main/scala/B.scala"]}'
 scalafmt-direct call check-files  '{"files":["src/main/scala/A.scala"]}'
+
+# multi-method fan-out (1 HTTP roundtrip + 1 tool_result)
+scalafmt-direct batch-json '[
+  {"method":"check-files","params":{"files":["src/A.scala"]}},
+  {"method":"check-files","params":{"files":["src/B.scala"]}}
+]'
 ```
+
+`format-files` and `check-files` already accept multi-file `files: [...]` natively (server-side loop). Use `batch-json` for mixed-method fan-out (e.g. format one file + check another in a single roundtrip). Per-call envelope `{ok:true,value}|{ok:false,error}` per sub-call so one bad path NEVER poisons siblings. The file-positional `batch <method> <file>...` convenience is NOT exposed (scalafmt verbs already accept file lists natively).
 
 ## Method surface
 
