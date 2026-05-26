@@ -7,6 +7,8 @@ set -euo pipefail
 
 STATE_ROOT="${DOTNET_DIRECT_STATE:-$HOME/.cache/dotnet-direct}"
 COORDINATOR="$HOME/.claude/bin/dotnet-direct-coordinator.js"
+# shellcheck source=/dev/null
+. "$(dirname "$COORDINATOR")/lib/find-claude-pid.sh"
 WORKSPACE_MARKERS=(global.json)
 # fallback markers checked via extension glob below
 FALLBACK_PATTERNS=('*.sln' '*.slnx' '*.csproj' '*.fsproj' '*.vbproj')
@@ -67,7 +69,8 @@ cmd_start() {
   port="$(free_port)"
   echo "$ws" > "$dir/workspace"
   echo "$port" > "$dir/port"
-  nohup node "$COORDINATOR" --tool-name dotnet-direct --workspace "$ws" --port "$port" >"$dir/log" 2>&1 &
+  local parent_pid; parent_pid="$(find_claude_pid 2>/dev/null || echo "$PPID")"
+  nohup node "$COORDINATOR" --tool-name dotnet-direct --workspace "$ws" --port "$port" --parent-pid "$parent_pid" >"$dir/log" 2>&1 &
   pid=$!
   echo "$pid" > "$dir/pid"
   local i=0

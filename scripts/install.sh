@@ -25,8 +25,8 @@ BIN_FILES=(
   # Shared harness + coordinator modules
   tool-harness.js tool-server-proxy.js node-formatter-daemon.js
 )
-# adapters dir symlinked as a whole (one entry per adapter would balloon; the dir is stable)
-BIN_DIRS=(adapters)
+# adapters dir + lib dir symlinked as a whole — both stable directory contracts.
+BIN_DIRS=(adapters lib)
 HOOK_FILES=(enforce-lsp-over-grep.py enforce-lsp-workspace-root.py prewarm-direct-wrappers.py)
 TEST_FILES=(test_enforce_lsp_over_grep.py test_enforce_lsp_workspace_root.py)
 

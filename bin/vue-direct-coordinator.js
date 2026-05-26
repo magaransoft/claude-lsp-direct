@@ -16,6 +16,7 @@ const fs = require('fs');
 
 const { createProxy } = require('./tool-server-proxy.js');
 const { createAdapter } = require('./adapters/vue-hybrid.js');
+const { installParentWatchdog, parseParentPidArg } = require('./lib/parent-watchdog.js');
 
 function arg(name, def) {
   const i = process.argv.indexOf('--' + name);
@@ -29,6 +30,8 @@ const PORT = parseInt(arg('port', '0'), 10);
 const TOOL_NAME = arg('tool-name', 'vue-direct');
 
 if (!fs.existsSync(WORKSPACE)) die(`workspace does not exist: ${WORKSPACE}`);
+
+installParentWatchdog({ parentPid: parseParentPidArg(process.argv), toolName: TOOL_NAME });
 
 createProxy({
   adapter: createAdapter({ name: TOOL_NAME }),

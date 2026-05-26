@@ -9,6 +9,7 @@ const fs = require('fs');
 
 const { createDaemon } = require('./node-formatter-daemon.js');
 const { createAdapter } = require('./adapters/prettier.js');
+const { installParentWatchdog, parseParentPidArg } = require('./lib/parent-watchdog.js');
 
 function arg(name, def) {
   const i = process.argv.indexOf('--' + name);
@@ -22,6 +23,8 @@ const PORT = parseInt(arg('port', '0'), 10);
 const TOOL_NAME = arg('tool-name', 'prettier-direct');
 
 if (!fs.existsSync(WORKSPACE)) die(`workspace does not exist: ${WORKSPACE}`);
+
+installParentWatchdog({ parentPid: parseParentPidArg(process.argv), toolName: TOOL_NAME });
 
 createDaemon({
   adapter: createAdapter({ name: TOOL_NAME }),

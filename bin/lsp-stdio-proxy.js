@@ -15,6 +15,7 @@ const fs = require('fs');
 
 const { createProxy } = require('./tool-server-proxy.js');
 const { createAdapter } = require('./adapters/lsp-stdio.js');
+const { installParentWatchdog, parseParentPidArg } = require('./lib/parent-watchdog.js');
 
 function arg(name, def) {
   const i = process.argv.indexOf('--' + name);
@@ -39,6 +40,8 @@ const SPAWN = lspArgv();
 
 if (!SPAWN) die('missing LSP command — pass it after --: ...proxy.js --workspace X --port N --lang-id python -- pyright-langserver --stdio');
 if (!fs.existsSync(WORKSPACE)) die(`workspace does not exist: ${WORKSPACE}`);
+
+installParentWatchdog({ parentPid: parseParentPidArg(process.argv), toolName: TOOL_NAME });
 
 // invalidation matrix keyed on LANG_ID. Same binary drives py/ts/cs/java
 // with per-language trigger sets.

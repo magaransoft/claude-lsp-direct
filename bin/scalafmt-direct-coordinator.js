@@ -9,6 +9,7 @@ const fs = require('fs');
 
 const { createProxy } = require('./tool-server-proxy.js');
 const { createAdapter } = require('./adapters/scalafmt-cli.js');
+const { installParentWatchdog, parseParentPidArg } = require('./lib/parent-watchdog.js');
 
 function arg(name, def) {
   const i = process.argv.indexOf('--' + name);
@@ -23,6 +24,8 @@ const TOOL_NAME = arg('tool-name', 'scalafmt-direct');
 const SCALAFMT_CMD = arg('scalafmt-cmd', 'scalafmt');
 
 if (!fs.existsSync(WORKSPACE)) die(`workspace does not exist: ${WORKSPACE}`);
+
+installParentWatchdog({ parentPid: parseParentPidArg(process.argv), toolName: TOOL_NAME });
 
 createProxy({
   adapter: createAdapter({ name: TOOL_NAME, scalafmtCmd: SCALAFMT_CMD }),
